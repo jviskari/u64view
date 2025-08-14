@@ -36,7 +36,6 @@ class NetworkReceiver {
                 try self?.joinMulticastGroup()
                 self?.startListening()
                 self?.isReceiving = true
-                print("Started receiving on \(self?.multicastGroup ?? ""):\(self?.port ?? 0)")
             } catch {
                 self?.cleanup()
                 DispatchQueue.main.async {
@@ -47,13 +46,11 @@ class NetworkReceiver {
     }
     
     private func setupSocket() throws {
-        // Create UDP socket - exactly like C++ version
         socketFD = socket(AF_INET, SOCK_DGRAM, 0)
         guard socketFD >= 0 else {
             throw NetworkError.socketCreationFailed
         }
         
-        // Set socket to non-blocking - like C++ version
         let flags = fcntl(socketFD, F_GETFL, 0)
         guard flags != -1 else {
             throw NetworkError.socketOptionFailed
@@ -62,16 +59,14 @@ class NetworkReceiver {
             throw NetworkError.socketOptionFailed
         }
         
-        // Allow socket reuse
         var reuseAddr: Int32 = 1
         guard setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuseAddr, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
             throw NetworkError.socketOptionFailed
         }
         
-        // Bind to INADDR_ANY on the specified port - exactly like C++ version
         var serverAddr = sockaddr_in()
         serverAddr.sin_family = sa_family_t(AF_INET)
-        serverAddr.sin_addr.s_addr = INADDR_ANY  // This is key!
+        serverAddr.sin_addr.s_addr = INADDR_ANY
         serverAddr.sin_port = port.bigEndian
         
         let bindResult = withUnsafePointer(to: &serverAddr) {
@@ -81,29 +76,18 @@ class NetworkReceiver {
         }
         
         guard bindResult == 0 else {
-            let error = String(cString: strerror(errno))
-            print("Bind failed: \(error)")
             throw NetworkError.bindFailed
         }
-        
-        print("Socket bound to port \(port)")
     }
     
     private func joinMulticastGroup() throws {
-        // Join multicast group - exactly like C++ version
         var mreq = ip_mreq()
-        
-        // Set multicast group address
         mreq.imr_multiaddr.s_addr = inet_addr(multicastGroup)
         mreq.imr_interface.s_addr = INADDR_ANY
         
         guard setsockopt(socketFD, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, socklen_t(MemoryLayout<ip_mreq>.size)) == 0 else {
-            let error = String(cString: strerror(errno))
-            print("Failed to join multicast group: \(error)")
             throw NetworkError.multicastJoinFailed
         }
-        
-        print("Joined multicast group \(multicastGroup)")
     }
     
     private func startListening() {
@@ -121,18 +105,15 @@ class NetworkReceiver {
         }
         
         source?.resume()
-        print("Started listening for packets")
     }
     
     private func handleSocketData() {
         var buffer = [UInt8](repeating: 0, count: 1024)
         
-        // Use recv() like the C++ version
         let bytesReceived = recv(socketFD, &buffer, buffer.count, 0)
         
         if bytesReceived > 0 {
             let data = Data(buffer.prefix(bytesReceived))
-            print("Received \(bytesReceived) bytes") // Debug output
             
             DispatchQueue.main.async {
                 self.delegate?.networkReceiver(self, didReceivePacket: data)
@@ -140,7 +121,10 @@ class NetworkReceiver {
         } else if bytesReceived == -1 {
             let error = errno
             if error != EAGAIN && error != EWOULDBLOCK {
-                print("Receive error: \(String(cString: strerror(error)))")
+                // Only report actual errors, not "would block" conditions
+                DispatchQueue.main.async {
+                    self.delegate?.networkReceiver(self, didEncounterError: NetworkError.receiveError)
+                }
             }
         }
     }
@@ -152,8 +136,6 @@ class NetworkReceiver {
         source?.cancel()
         source = nil
         cleanup()
-        
-        print("Network receiver stopped")
     }
     
     private func cleanup() {
@@ -174,6 +156,7 @@ enum NetworkError: Error, LocalizedError {
     case bindFailed
     case invalidMulticastAddress
     case multicastJoinFailed
+    case receiveError
     
     var errorDescription: String? {
         switch self {
@@ -187,6 +170,8 @@ enum NetworkError: Error, LocalizedError {
             return "Invalid multicast address"
         case .multicastJoinFailed:
             return "Failed to join multicast group"
+        case .receiveError:
+            return "Network receive error"
         }
     }
 }

@@ -13,22 +13,13 @@ struct VideoDisplayView: View {
                     Image(nsImage: nsImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .onAppear {
-                            print("Displaying image for frame \(frame.number), size: \(nsImage.size)")
-                        }
                 } else {
-                    Text("Failed to create image for frame \(frame.number)")
+                    Text("Failed to create image")
                         .foregroundColor(.red)
-                        .onAppear {
-                            print("Failed to create NSImage for frame \(frame.number)")
-                        }
                 }
             } else {
                 Text("Waiting for video stream...")
                     .foregroundColor(.white)
-                    .onAppear {
-                        print("No frame available for display")
-                    }
             }
         }
     }

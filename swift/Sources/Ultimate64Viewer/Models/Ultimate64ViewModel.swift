@@ -13,18 +13,18 @@ class Ultimate64ViewModel: ObservableObject {
     private let frameProcessor = FrameProcessor()
     
     private var frameQueue: [ProcessedFrame] = []
-    private let jitterBufferSize = 1  // Reduced from 2 for lower latency
-    private let maxQueueSize = 3      // Reduced from 10
+    private let jitterBufferSize = 1
+    private let maxQueueSize = 3
     
     private var lastDisplayedFrameNumber: UInt16 = 0
     private var hasLastFrame = false
     
     // FPS calculation
     private var frameTimestamps: [Date] = []
-    private let fpsCalculationWindow: TimeInterval = 1.0  // Reduced window
+    private let fpsCalculationWindow: TimeInterval = 1.0
     
-    // Frame timing - more aggressive
-    private let frameInterval: TimeInterval = 1.0 / 60.0 // 60Hz display refresh
+    // Frame timing
+    private let frameInterval: TimeInterval = 1.0 / 60.0
     private var displayTimer: Timer?
     
     init() {
@@ -38,17 +38,25 @@ class Ultimate64ViewModel: ObservableObject {
         networkReceiver.startReceiving()
         isReceiving = true
         errorMessage = nil
-        
-        print("Started receiving Ultimate 64 video stream...")
     }
     
     func stopReceiving() {
         guard isReceiving else { return }
         
-        networkReceiver.stopReceiving()
+        cleanup()
         isReceiving = false
+    }
+    
+    // Make cleanup non-actor isolated so it can be called from deinit
+    nonisolated private func cleanup() {
+        networkReceiver.stopReceiving()
         
-        print("Stopped receiving video stream")
+        // Clean up timer on main queue
+        DispatchQueue.main.async { [weak self] in
+            self?.displayTimer?.invalidate()
+            self?.displayTimer = nil
+            self?.frameQueue.removeAll()
+        }
     }
     
     private func startDisplayTimer() {
@@ -60,13 +68,10 @@ class Ultimate64ViewModel: ObservableObject {
     }
     
     private func displayNextFrame() {
-        // More aggressive frame display - don't wait for jitter buffer if we have any frames
         guard !frameQueue.isEmpty else { return }
         
-        // If we have too many frames, skip to the latest to reduce latency
+        // Skip frames if queue is getting full to reduce latency
         if frameQueue.count > jitterBufferSize {
-            print("Skipping \(frameQueue.count - 1) frames to reduce latency")
-            // Keep only the latest frame
             let latestFrame = frameQueue.last!
             frameQueue.removeAll()
             frameQueue.append(latestFrame)
@@ -74,7 +79,6 @@ class Ultimate64ViewModel: ObservableObject {
         
         let frame = frameQueue.removeFirst()
         
-        // Always display the frame - don't check sequence numbers for now
         currentFrame = frame
         frameNumber = frame.number
         lastDisplayedFrameNumber = frame.number
@@ -84,9 +88,6 @@ class Ultimate64ViewModel: ObservableObject {
     }
     
     private func addFrameToQueue(_ frame: ProcessedFrame) {
-        // Remove debug output for performance
-        
-        // Keep queue small for low latency
         while frameQueue.count >= maxQueueSize {
             frameQueue.removeFirst()
         }
@@ -98,17 +99,15 @@ class Ultimate64ViewModel: ObservableObject {
         let now = Date()
         frameTimestamps.append(now)
         
-        // Remove old timestamps outside the calculation window
         frameTimestamps.removeAll { now.timeIntervalSince($0) > fpsCalculationWindow }
         
-        // Calculate FPS
         if frameTimestamps.count > 1 {
             fps = Double(frameTimestamps.count - 1) / fpsCalculationWindow
         }
     }
     
     deinit {
-        displayTimer?.invalidate()
+        cleanup()
     }
 }
 
@@ -116,7 +115,6 @@ extension Ultimate64ViewModel: NetworkReceiverDelegate {
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didReceivePacket data: Data) {
         Task { @MainActor in
             if let frame = self.frameProcessor.processPacket(data) {
-                // Remove debug output for performance
                 self.addFrameToQueue(frame)
             }
         }
@@ -125,7 +123,6 @@ extension Ultimate64ViewModel: NetworkReceiverDelegate {
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didEncounterError error: Error) {
         Task { @MainActor in
             self.errorMessage = "Network error: \(error.localizedDescription)"
-            print("Network error: \(error)")
         }
     }
 }
