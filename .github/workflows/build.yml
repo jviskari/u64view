@@ -1,0 +1,28 @@
+name: Build Ultimate64Viewer
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Build
+      run: |
+        cd xcode
+        xcodebuild -scheme Ultimate64Viewer -configuration Release -archivePath Ultimate64Viewer.xcarchive archive
+        xcodebuild -exportArchive -archivePath Ultimate64Viewer.xcarchive -exportPath ./build -exportOptionsPlist ExportOptions.plist
+        
+    - name: Create DMG
+      run: |
+        hdiutil create -volname "Ultimate64Viewer" -srcfolder ./build/Ultimate64Viewer.app -ov -format UDZO Ultimate64Viewer.dmg
+        
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: Ultimate64Viewer.dmg
