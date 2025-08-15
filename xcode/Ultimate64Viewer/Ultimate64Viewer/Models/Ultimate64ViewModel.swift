@@ -4,11 +4,14 @@ import Combine
 @MainActor
 class Ultimate64ViewModel: ObservableObject {
     @Published var currentFrame: ProcessedFrame?
+    @Published var sourceIP: String?
+    @Published var showConnectionInfo = false
     
     nonisolated private let networkReceiver = NetworkReceiver()
     private let frameProcessor = FrameProcessor()
     private var frameQueue: [ProcessedFrame] = []
     private var displayTimer: Timer?
+    private var connectionInfoTimer: Timer?
     
     private let frameInterval: TimeInterval = 1.0 / 50.0 // PAL 50Hz
     private let maxQueueSize = 3
@@ -31,6 +34,8 @@ class Ultimate64ViewModel: ObservableObject {
         Task { @MainActor in
             self.displayTimer?.invalidate()
             self.displayTimer = nil
+            self.connectionInfoTimer?.invalidate()
+            self.connectionInfoTimer = nil
             self.frameQueue.removeAll()
         }
     }
@@ -49,6 +54,16 @@ class Ultimate64ViewModel: ObservableObject {
         // Always show the latest frame to minimize latency
         currentFrame = frameQueue.removeLast()
         frameQueue.removeAll()
+        
+        // Show connection info briefly when first receiving
+        if !showConnectionInfo {
+            showConnectionInfo = true
+            connectionInfoTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    self?.showConnectionInfo = false
+                }
+            }
+        }
     }
     
     private func addFrameToQueue(_ frame: ProcessedFrame) {
@@ -67,6 +82,11 @@ class Ultimate64ViewModel: ObservableObject {
 extension Ultimate64ViewModel: NetworkReceiverDelegate {
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didReceivePacket data: Data) {
         Task { @MainActor in
+            // Get source IP from the receiver
+            if let source = receiver.lastSourceIP, self.sourceIP != source {
+                self.sourceIP = source
+            }
+            
             if let frame = self.frameProcessor.processPacket(data) {
                 self.addFrameToQueue(frame)
             }
@@ -74,6 +94,6 @@ extension Ultimate64ViewModel: NetworkReceiverDelegate {
     }
     
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didEncounterError error: Error) {
-        // Silently handle errors - could add logging if needed
+        // Silently handle errors
     }
 }

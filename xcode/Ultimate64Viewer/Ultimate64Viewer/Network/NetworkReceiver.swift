@@ -13,6 +13,7 @@ protocol NetworkReceiverDelegate: AnyObject {
 
 class NetworkReceiver {
     weak var delegate: NetworkReceiverDelegate?
+    var lastSourceIP: String? // Add this property
     
     private let multicastGroup: String
     private let port: UInt16
@@ -109,11 +110,21 @@ class NetworkReceiver {
     
     private func handleSocketData() {
         var buffer = [UInt8](repeating: 0, count: 1024)
+        var clientAddr = sockaddr_in()
+        var clientAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
         
-        let bytesReceived = recv(socketFD, &buffer, buffer.count, 0)
+        let bytesReceived = withUnsafeMutablePointer(to: &clientAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                recvfrom(socketFD, &buffer, buffer.count, 0, $0, &clientAddrLen)
+            }
+        }
         
         if bytesReceived > 0 {
             let data = Data(buffer.prefix(bytesReceived))
+            
+            // Extract source IP and store it
+            let sourceIP = String(cString: inet_ntoa(clientAddr.sin_addr))
+            self.lastSourceIP = sourceIP
             
             DispatchQueue.main.async {
                 self.delegate?.networkReceiver(self, didReceivePacket: data)
@@ -121,7 +132,6 @@ class NetworkReceiver {
         } else if bytesReceived == -1 {
             let error = errno
             if error != EAGAIN && error != EWOULDBLOCK {
-                // Only report actual errors, not "would block" conditions
                 DispatchQueue.main.async {
                     self.delegate?.networkReceiver(self, didEncounterError: NetworkError.receiveError)
                 }
