@@ -9,7 +9,11 @@ class Ultimate64ViewModel: ObservableObject {
     @Published var isConnected = false
     
     nonisolated private let networkReceiver = NetworkReceiver()
+    nonisolated private let audioReceiver = AudioReceiver()
     private let frameProcessor = FrameProcessor()
+    private let audioProcessor = AudioProcessor()
+    private let audioPlayer = AudioPlayer()
+    
     private var frameQueue: [ProcessedFrame] = []
     private var displayTimer: Timer?
     private var connectionInfoTimer: Timer?
@@ -19,11 +23,17 @@ class Ultimate64ViewModel: ObservableObject {
     private let maxQueueSize = 3
     private let connectionTimeout: TimeInterval = 5.0
     
-    private var isShuttingDown = false // Add shutdown flag
+    private var isShuttingDown = false
     
     init() {
         networkReceiver.delegate = self
+        audioReceiver.delegate = self
         startDisplayTimer()
+        
+        // Auto-start both like before
+        startReceiving()
+        audioReceiver.startReceiving()
+        audioPlayer.startPlayback()
     }
     
     func startReceiving() {
@@ -38,10 +48,9 @@ class Ultimate64ViewModel: ObservableObject {
     }
     
     nonisolated private func cleanup() {
-        // Stop network receiver first
         networkReceiver.stopReceiving()
+        audioReceiver.stopReceiving()
         
-        // Clean up on main thread
         Task { @MainActor in
             self.stopAllTimers()
             self.frameQueue.removeAll()
@@ -131,6 +140,7 @@ class Ultimate64ViewModel: ObservableObject {
     }
 }
 
+// MARK: - NetworkReceiverDelegate
 extension Ultimate64ViewModel: NetworkReceiverDelegate {
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didReceivePacket data: Data) {
         Task { @MainActor in
@@ -150,6 +160,22 @@ extension Ultimate64ViewModel: NetworkReceiverDelegate {
     
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didEncounterError error: Error) {
         // Silently handle errors during normal operation
-        // Could log for debugging if needed
+    }
+}
+
+// MARK: - AudioReceiverDelegate
+extension Ultimate64ViewModel: AudioReceiverDelegate {
+    nonisolated func audioReceiver(_ receiver: AudioReceiver, didReceivePacket data: Data) {
+        Task { @MainActor in
+            guard !self.isShuttingDown else { return }
+            
+            if let processedAudio = self.audioProcessor.processPacket(data) {
+                self.audioPlayer.playAudioData(processedAudio.pcmData)
+            }
+        }
+    }
+    
+    nonisolated func audioReceiver(_ receiver: AudioReceiver, didEncounterError error: Error) {
+        // Silently handle audio errors
     }
 }
