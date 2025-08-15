@@ -2,13 +2,22 @@ import Foundation
 
 class FrameProcessor {
     private var currentFrameNumber: UInt16 = 0
-    private var packetsCollected: [Data] = []
+    private var packetsCollected: [UInt16: Data] = [:] // Use dictionary for out-of-order packets
     private let packetsPerFrame = 68
     private let frameWidth = 384
     private let frameHeight = 272
     
     private var frameStarted = false
     private let lock = NSLock()
+    
+    // Jitter handling
+    private var frameTimeout: Date?
+    private let frameTimeoutInterval: TimeInterval = 0.1 // 100ms timeout for incomplete frames
+    
+    // Frame loss tracking
+    private var framesReceived = 0
+    private var framesLost = 0
+    private var lastStatsReport = Date()
     
     func processPacket(_ data: Data) -> ProcessedFrame? {
         lock.lock()
@@ -18,66 +27,82 @@ class FrameProcessor {
         
         let header = PacketHeader(from: data)
         
-        // Check if this is a new frame
-        if !frameStarted {
-            currentFrameNumber = header.frm
+        // Check for frame timeout
+        if let timeout = frameTimeout, Date() > timeout {
+            // Current frame timed out, abandon it
+            if packetsCollected.count > 0 {
+                framesLost += 1
+                reportStatsIfNeeded()
+            }
             packetsCollected.removeAll()
-            frameStarted = true
+            frameStarted = false
+            frameTimeout = nil
         }
         
-        if header.frm != currentFrameNumber {
-            // Process the completed frame if we have enough packets
+        // Check if this is a new frame
+        if !frameStarted || header.frm != currentFrameNumber {
+            // Process the previous frame if we have enough packets
             var completedFrame: ProcessedFrame? = nil
-            if packetsCollected.count == packetsPerFrame {
+            if frameStarted && packetsCollected.count >= packetsPerFrame * 3/4 { // Accept frame if we have 75% of packets
                 completedFrame = assembleFrame(frameNumber: currentFrameNumber, packets: packetsCollected)
+                framesReceived += 1
+            } else if frameStarted && packetsCollected.count > 0 {
+                framesLost += 1
             }
             
             // Start new frame
             currentFrameNumber = header.frm
             packetsCollected.removeAll()
             frameStarted = true
+            frameTimeout = Date().addingTimeInterval(frameTimeoutInterval)
             
-            // Add packet data for new frame (skip 12-byte header)
+            // Add this packet to the new frame
             let pixelData = data.dropFirst(12)
-            packetsCollected.append(Data(pixelData))
+            packetsCollected[header.lin] = Data(pixelData)
             
+            reportStatsIfNeeded()
             return completedFrame
         }
         
-        // Add packet data (skip 12-byte header)
+        // Add packet data to current frame (use line number as key for ordering)
         let pixelData = data.dropFirst(12)
-        packetsCollected.append(Data(pixelData))
+        packetsCollected[header.lin] = Data(pixelData)
         
         // Check if frame is complete
         if packetsCollected.count == packetsPerFrame {
             let frame = assembleFrame(frameNumber: currentFrameNumber, packets: packetsCollected)
             packetsCollected.removeAll()
             frameStarted = false
+            frameTimeout = nil
+            framesReceived += 1
             return frame
         }
         
         return nil
     }
     
-    private func assembleFrame(frameNumber: UInt16, packets: [Data]) -> ProcessedFrame {
+    private func assembleFrame(frameNumber: UInt16, packets: [UInt16: Data]) -> ProcessedFrame {
         var rgbData = Data(count: frameWidth * frameHeight * 3)
+        
+        // Sort packets by line number
+        let sortedPackets = packets.sorted { $0.key < $1.key }
         
         var y = 0
         
-        for packet in packets {
+        for (lineNumber, packetData) in sortedPackets {
             guard y < frameHeight else { break }
             
             var pixelIndex = 0
             
             // Each packet contains 4 lines of data
-            for _ in 0..<4 {
+            for lineInPacket in 0..<4 {
                 guard y < frameHeight else { break }
                 
                 // Each line has 192 bytes (384 pixels / 2 pixels per byte)
                 for x in stride(from: 0, to: min(192, frameWidth / 2), by: 1) {
-                    guard pixelIndex < packet.count else { break }
+                    guard pixelIndex < packetData.count else { break }
                     
-                    let byte = packet[pixelIndex]
+                    let byte = packetData[pixelIndex]
                     pixelIndex += 1
                     
                     // Extract two 4-bit pixels
@@ -111,5 +136,21 @@ class FrameProcessor {
         }
         
         return ProcessedFrame(number: frameNumber, rgbData: rgbData, width: frameWidth, height: frameHeight)
+    }
+    
+    private func reportStatsIfNeeded() {
+        let now = Date()
+        if now.timeIntervalSince(lastStatsReport) > 10.0 { // Report every 10 seconds
+            let totalFrames = framesReceived + framesLost
+            if totalFrames > 0 {
+                let lossRate = Double(framesLost) / Double(totalFrames) * 100.0
+                if lossRate > 0.1 { // Only report if loss rate > 0.1%
+                    print("📺 Video: \(framesLost)/\(totalFrames) frames lost (\(String(format: "%.2f", lossRate))%)")
+                }
+            }
+            lastStatsReport = now
+            framesLost = 0
+            framesReceived = 0
+        }
     }
 }
