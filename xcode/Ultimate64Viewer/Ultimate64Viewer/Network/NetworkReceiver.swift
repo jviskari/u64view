@@ -22,6 +22,7 @@ class NetworkReceiver {
     private var source: DispatchSourceRead?
     
     private var isReceiving = false
+    private var isShuttingDown = false // Add shutdown flag
     
     init(multicastGroup: String = "239.0.1.64", port: UInt16 = 11000) {
         self.multicastGroup = multicastGroup
@@ -29,18 +30,21 @@ class NetworkReceiver {
     }
     
     func startReceiving() {
-        guard !isReceiving else { return }
+        guard !isReceiving && !isShuttingDown else { return }
         
         queue.async { [weak self] in
+            guard let self = self, !self.isShuttingDown else { return }
+            
             do {
-                try self?.setupSocket()
-                try self?.joinMulticastGroup()
-                self?.startListening()
-                self?.isReceiving = true
+                try self.setupSocket()
+                try self.joinMulticastGroup()
+                self.startListening()
+                self.isReceiving = true
             } catch {
-                self?.cleanup()
+                self.cleanup()
                 DispatchQueue.main.async {
-                    self?.delegate?.networkReceiver(self!, didEncounterError: error)
+                    guard !self.isShuttingDown else { return }
+                    self.delegate?.networkReceiver(self, didEncounterError: error)
                 }
             }
         }
@@ -109,6 +113,8 @@ class NetworkReceiver {
     }
     
     private func handleSocketData() {
+        guard !isShuttingDown else { return }
+        
         var buffer = [UInt8](repeating: 0, count: 1024)
         var clientAddr = sockaddr_in()
         var clientAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -127,12 +133,14 @@ class NetworkReceiver {
             self.lastSourceIP = sourceIP
             
             DispatchQueue.main.async {
+                guard !self.isShuttingDown else { return }
                 self.delegate?.networkReceiver(self, didReceivePacket: data)
             }
         } else if bytesReceived == -1 {
             let error = errno
-            if error != EAGAIN && error != EWOULDBLOCK {
+            if error != EAGAIN && error != EWOULDBLOCK && !isShuttingDown {
                 DispatchQueue.main.async {
+                    guard !self.isShuttingDown else { return }
                     self.delegate?.networkReceiver(self, didEncounterError: NetworkError.receiveError)
                 }
             }
@@ -142,9 +150,15 @@ class NetworkReceiver {
     func stopReceiving() {
         guard isReceiving else { return }
         
+        isShuttingDown = true
         isReceiving = false
-        source?.cancel()
-        source = nil
+        
+        // Cancel source on the queue it was created on
+        queue.async { [weak self] in
+            self?.source?.cancel()
+            self?.source = nil
+        }
+        
         cleanup()
     }
     
@@ -156,6 +170,7 @@ class NetworkReceiver {
     }
     
     deinit {
+        isShuttingDown = true
         stopReceiving()
     }
 }

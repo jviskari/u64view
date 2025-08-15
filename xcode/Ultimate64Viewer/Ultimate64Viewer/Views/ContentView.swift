@@ -98,8 +98,8 @@ struct ContentView: View {
             startContinuousAnimation()
         }
         .onDisappear {
-            viewModel.stopReceiving()
             stopAnimation()
+            viewModel.stopReceiving()
         }
     }
     

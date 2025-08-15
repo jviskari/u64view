@@ -6,18 +6,20 @@ class Ultimate64ViewModel: ObservableObject {
     @Published var currentFrame: ProcessedFrame?
     @Published var sourceIP: String?
     @Published var showConnectionInfo = false
-    @Published var isConnected = false // Add connection state
+    @Published var isConnected = false
     
     nonisolated private let networkReceiver = NetworkReceiver()
     private let frameProcessor = FrameProcessor()
     private var frameQueue: [ProcessedFrame] = []
     private var displayTimer: Timer?
     private var connectionInfoTimer: Timer?
-    private var timeoutTimer: Timer? // Add timeout timer
+    private var timeoutTimer: Timer?
     
-    private let frameInterval: TimeInterval = 1.0 / 50.0 // PAL 50Hz
+    private let frameInterval: TimeInterval = 1.0 / 50.0
     private let maxQueueSize = 3
-    private let connectionTimeout: TimeInterval = 5.0 // 5 seconds timeout
+    private let connectionTimeout: TimeInterval = 5.0
+    
+    private var isShuttingDown = false // Add shutdown flag
     
     init() {
         networkReceiver.delegate = self
@@ -25,81 +27,98 @@ class Ultimate64ViewModel: ObservableObject {
     }
     
     func startReceiving() {
+        guard !isShuttingDown else { return }
         networkReceiver.startReceiving()
-        startTimeoutTimer() // Start monitoring for timeout
+        startTimeoutTimer()
     }
     
     func stopReceiving() {
+        isShuttingDown = true
         cleanup()
     }
     
     nonisolated private func cleanup() {
+        // Stop network receiver first
         networkReceiver.stopReceiving()
+        
+        // Clean up on main thread
         Task { @MainActor in
-            self.displayTimer?.invalidate()
-            self.displayTimer = nil
-            self.connectionInfoTimer?.invalidate()
-            self.connectionInfoTimer = nil
-            self.timeoutTimer?.invalidate()
-            self.timeoutTimer = nil
+            self.stopAllTimers()
             self.frameQueue.removeAll()
+            self.currentFrame = nil
+            self.sourceIP = nil
+            self.isConnected = false
+            self.showConnectionInfo = false
         }
     }
     
+    private func stopAllTimers() {
+        displayTimer?.invalidate()
+        displayTimer = nil
+        
+        connectionInfoTimer?.invalidate()
+        connectionInfoTimer = nil
+        
+        timeoutTimer?.invalidate()
+        timeoutTimer = nil
+    }
+    
     private func startDisplayTimer() {
+        guard !isShuttingDown else { return }
         displayTimer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.displayNextFrame()
+                guard let self = self, !self.isShuttingDown else { return }
+                self.displayNextFrame()
             }
         }
     }
     
     private func startTimeoutTimer() {
+        guard !isShuttingDown else { return }
         timeoutTimer?.invalidate()
         timeoutTimer = Timer.scheduledTimer(withTimeInterval: connectionTimeout, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.handleConnectionTimeout()
+                guard let self = self, !self.isShuttingDown else { return }
+                self.handleConnectionTimeout()
             }
         }
     }
     
     private func resetTimeoutTimer() {
-        startTimeoutTimer() // Restart the timeout timer
+        guard !isShuttingDown else { return }
+        startTimeoutTimer()
     }
     
     private func handleConnectionTimeout() {
-        // Connection lost - fall back to waiting state
+        guard !isShuttingDown else { return }
         isConnected = false
         currentFrame = nil
-        sourceIP = nil
         showConnectionInfo = false
         frameQueue.removeAll()
-        
-        // Keep monitoring for new connections
         startTimeoutTimer()
     }
     
     private func displayNextFrame() {
-        guard !frameQueue.isEmpty else { return }
+        guard !frameQueue.isEmpty && !isShuttingDown else { return }
         
-        // Always show the latest frame to minimize latency
         currentFrame = frameQueue.removeLast()
         frameQueue.removeAll()
         
-        // Mark as connected and show connection info briefly when first receiving
         if !isConnected {
             isConnected = true
             showConnectionInfo = true
             connectionInfoTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
                 Task { @MainActor in
-                    self?.showConnectionInfo = false
+                    guard let self = self, !self.isShuttingDown else { return }
+                    self.showConnectionInfo = false
                 }
             }
         }
     }
     
     private func addFrameToQueue(_ frame: ProcessedFrame) {
-        // Keep only the latest frames
+        guard !isShuttingDown else { return }
+        
         while frameQueue.count >= maxQueueSize {
             frameQueue.removeFirst()
         }
@@ -107,6 +126,7 @@ class Ultimate64ViewModel: ObservableObject {
     }
     
     deinit {
+        isShuttingDown = true
         cleanup()
     }
 }
@@ -114,10 +134,10 @@ class Ultimate64ViewModel: ObservableObject {
 extension Ultimate64ViewModel: NetworkReceiverDelegate {
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didReceivePacket data: Data) {
         Task { @MainActor in
-            // Reset timeout timer - we received a packet
+            guard !self.isShuttingDown else { return }
+            
             self.resetTimeoutTimer()
             
-            // Get source IP from the receiver
             if let source = receiver.lastSourceIP, self.sourceIP != source {
                 self.sourceIP = source
             }
@@ -129,6 +149,7 @@ extension Ultimate64ViewModel: NetworkReceiverDelegate {
     }
     
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didEncounterError error: Error) {
-        // Silently handle errors
+        // Silently handle errors during normal operation
+        // Could log for debugging if needed
     }
 }
