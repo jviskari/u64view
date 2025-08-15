@@ -43,33 +43,26 @@ class AudioPlayer {
         } catch {
             print("🎵 AudioPlayer: Failed to setup iOS audio session: \(error)")
         }
-        #elseif os(macOS)
-        // macOS doesn't need audio session configuration
         #endif
+        // macOS doesn't need audio session configuration
     }
     
     private func setupAudioEngine() {
         guard !isEngineSetup else { return }
         
-        do {
-            // Attach player node
-            audioEngine.attach(playerNode)
-            
-            // Connect with explicit format
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
-            
-            // Set output volume
-            audioEngine.mainMixerNode.outputVolume = 1.0
-            
-            // Prepare the engine
-            audioEngine.prepare()
-            
-            isEngineSetup = true
-            
-        } catch {
-            print("🎵 AudioPlayer: Failed to setup audio engine: \(error)")
-            isEngineSetup = false
-        }
+        // Attach player node
+        audioEngine.attach(playerNode)
+        
+        // Connect with explicit format
+        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
+        
+        // Set output volume
+        audioEngine.mainMixerNode.outputVolume = 1.0
+        
+        // Prepare the engine
+        audioEngine.prepare()
+        
+        isEngineSetup = true
     }
     
     func startPlayback() {
@@ -83,9 +76,7 @@ class AudioPlayer {
                 self.setupAudioEngine()
             }
             
-            guard self.isEngineSetup else {
-                return
-            }
+            guard self.isEngineSetup else { return }
             
             #if os(iOS)
             // Reactivate audio session on iOS if needed
@@ -127,7 +118,7 @@ class AudioPlayer {
             }
             
             #if os(iOS)
-            // Optionally deactivate audio session on iOS
+            // Deactivate audio session on iOS
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
@@ -138,13 +129,7 @@ class AudioPlayer {
     }
     
     func playAudioData(_ pcmData: Data) {
-        guard isPlaying else { 
-            return 
-        }
-        
-        guard !pcmData.isEmpty else {
-            return
-        }
+        guard isPlaying && !pcmData.isEmpty else { return }
         
         audioQueue.async { [weak self] in
             guard let self = self else { return }
@@ -155,9 +140,7 @@ class AudioPlayer {
             }
             
             let frameCount = int16Data.count / 2 // Stereo = 2 channels
-            guard frameCount > 0 else {
-                return
-            }
+            guard frameCount > 0 else { return }
             
             guard let audioBuffer = AVAudioPCMBuffer(pcmFormat: self.audioFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
                 return

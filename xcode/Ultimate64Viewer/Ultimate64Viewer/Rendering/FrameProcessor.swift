@@ -89,13 +89,13 @@ class FrameProcessor {
         
         var y = 0
         
-        for (lineNumber, packetData) in sortedPackets {
+        for (_, packetData) in sortedPackets {
             guard y < frameHeight else { break }
             
             var pixelIndex = 0
             
             // Each packet contains 4 lines of data
-            for lineInPacket in 0..<4 {
+            for _ in 0..<4 {
                 guard y < frameHeight else { break }
                 
                 // Each line has 192 bytes (384 pixels / 2 pixels per byte)
