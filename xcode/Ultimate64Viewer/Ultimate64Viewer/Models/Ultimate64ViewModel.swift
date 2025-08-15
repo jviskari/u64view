@@ -23,14 +23,14 @@ class Ultimate64ViewModel: ObservableObject {
     private let maxQueueSize = 3
     private let connectionTimeout: TimeInterval = 5.0
     
-    private var isShuttingDown = false
+    private var isShuttingDown = false // Add shutdown flag
     
     init() {
         networkReceiver.delegate = self
         audioReceiver.delegate = self
         startDisplayTimer()
         
-        // Auto-start both like before
+        // Auto-start both video and audio
         startReceiving()
         audioReceiver.startReceiving()
         audioPlayer.startPlayback()
@@ -48,9 +48,11 @@ class Ultimate64ViewModel: ObservableObject {
     }
     
     nonisolated private func cleanup() {
+        // Stop network receiver first
         networkReceiver.stopReceiving()
         audioReceiver.stopReceiving()
         
+        // Clean up on main thread
         Task { @MainActor in
             self.stopAllTimers()
             self.frameQueue.removeAll()
@@ -140,7 +142,6 @@ class Ultimate64ViewModel: ObservableObject {
     }
 }
 
-// MARK: - NetworkReceiverDelegate
 extension Ultimate64ViewModel: NetworkReceiverDelegate {
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didReceivePacket data: Data) {
         Task { @MainActor in
@@ -160,10 +161,10 @@ extension Ultimate64ViewModel: NetworkReceiverDelegate {
     
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didEncounterError error: Error) {
         // Silently handle errors during normal operation
+        // Could log for debugging if needed
     }
 }
 
-// MARK: - AudioReceiverDelegate
 extension Ultimate64ViewModel: AudioReceiverDelegate {
     nonisolated func audioReceiver(_ receiver: AudioReceiver, didReceivePacket data: Data) {
         Task { @MainActor in
