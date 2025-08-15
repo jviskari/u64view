@@ -1,4 +1,5 @@
 import Foundation
+
 #if canImport(UIKit)
 import UIKit
 #elseif canImport(AppKit)
@@ -24,17 +25,18 @@ struct ProcessedFrame: Identifiable {
     func createImage() -> Any? {
         guard rgbData.count == width * height * 3 else { return nil }
         
+        // Convert RGB to RGBA
         var rgbaData = Data(count: width * height * 4)
         for i in 0..<(width * height) {
             let rgbIndex = i * 3
             let rgbaIndex = i * 4
             
-            if rgbIndex + 2 < rgbData.count && rgbaIndex + 3 < rgbaData.count {
-                rgbaData[rgbaIndex] = rgbData[rgbIndex]
-                rgbaData[rgbaIndex + 1] = rgbData[rgbIndex + 1]
-                rgbaData[rgbaIndex + 2] = rgbData[rgbIndex + 2]
-                rgbaData[rgbaIndex + 3] = 255
-            }
+            guard rgbIndex + 2 < rgbData.count && rgbaIndex + 3 < rgbaData.count else { continue }
+            
+            rgbaData[rgbaIndex] = rgbData[rgbIndex]         // R
+            rgbaData[rgbaIndex + 1] = rgbData[rgbIndex + 1] // G
+            rgbaData[rgbaIndex + 2] = rgbData[rgbIndex + 2] // B
+            rgbaData[rgbaIndex + 3] = 255                   // A
         }
         
         let colorSpace = CGColorSpaceCreateDeviceRGB()

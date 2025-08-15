@@ -1,25 +1,30 @@
 import SwiftUI
-import AppKit
 
 struct VideoDisplayView: View {
     let frame: ProcessedFrame?
     
     var body: some View {
         ZStack {
-            Color.black
+            Color.black.ignoresSafeArea()
             
             if let frame = frame {
-                if let nsImage = frame.createNSImage() {
+                #if canImport(UIKit)
+                if let uiImage = frame.createImage() as? UIImage {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                }
+                #elseif canImport(AppKit)
+                if let nsImage = frame.createImage() as? NSImage {
                     Image(nsImage: nsImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                } else {
-                    Text("Failed to create image")
-                        .foregroundColor(.red)
                 }
+                #endif
             } else {
                 Text("Waiting for video stream...")
                     .foregroundColor(.white)
+                    .font(.title2)
             }
         }
     }

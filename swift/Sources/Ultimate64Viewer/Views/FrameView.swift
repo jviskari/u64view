@@ -13,7 +13,7 @@ struct FrameView: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSImageView, context: Context) {
         if let frame = frame {
-            nsView.image = frame.createNSImage()
+            nsView.image = frame.createImage() as? NSImage
         } else {
             nsView.image = nil
         }
