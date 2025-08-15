@@ -4,17 +4,29 @@ struct ContentView: View {
     @StateObject private var viewModel = Ultimate64ViewModel()
     
     var body: some View {
-        VStack(spacing: 0) {
-            VideoDisplayView(frame: viewModel.currentFrame)
+        ZStack {
+            Color.black.ignoresSafeArea()
             
-            StatusBarView(
-                isReceiving: viewModel.isReceiving,
-                frameNumber: viewModel.frameNumber,
-                fps: viewModel.fps,
-                errorMessage: viewModel.errorMessage
-            )
+            if let frame = viewModel.currentFrame {
+                #if canImport(UIKit)
+                if let uiImage = frame.createImage() as? UIImage {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                }
+                #elseif canImport(AppKit)
+                if let nsImage = frame.createImage() as? NSImage {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                }
+                #endif
+            } else {
+                Text("Waiting for video stream...")
+                    .foregroundColor(.white)
+                    .font(.title2)
+            }
         }
-        .frame(minWidth: 768, minHeight: 544)
         .onAppear {
             viewModel.startReceiving()
         }

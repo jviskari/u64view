@@ -1,13 +1,13 @@
 import SwiftUI
 
-struct VideoDisplayView: View {
-    let frame: ProcessedFrame?
+struct ContentView: View {
+    @StateObject private var viewModel = Ultimate64ViewModel()
     
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             
-            if let frame = frame {
+            if let frame = viewModel.currentFrame {
                 #if canImport(UIKit)
                 if let uiImage = frame.createImage() as? UIImage {
                     Image(uiImage: uiImage)
@@ -26,6 +26,12 @@ struct VideoDisplayView: View {
                     .foregroundColor(.white)
                     .font(.title2)
             }
+        }
+        .onAppear {
+            viewModel.startReceiving()
+        }
+        .onDisappear {
+            viewModel.stopReceiving()
         }
     }
 }
