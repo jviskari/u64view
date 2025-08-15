@@ -23,7 +23,7 @@ class Ultimate64ViewModel: ObservableObject {
     private let maxQueueSize = 3
     private let connectionTimeout: TimeInterval = 5.0
     
-    private var isShuttingDown = false // Add shutdown flag
+    private var isShuttingDown = false
     
     init() {
         networkReceiver.delegate = self
@@ -48,11 +48,9 @@ class Ultimate64ViewModel: ObservableObject {
     }
     
     nonisolated private func cleanup() {
-        // Stop network receiver first
         networkReceiver.stopReceiving()
         audioReceiver.stopReceiving()
         
-        // Clean up on main thread
         Task { @MainActor in
             self.stopAllTimers()
             self.frameQueue.removeAll()
@@ -112,6 +110,7 @@ class Ultimate64ViewModel: ObservableObject {
     private func displayNextFrame() {
         guard !frameQueue.isEmpty && !isShuttingDown else { return }
         
+        // Display the most recent frame (drop old ones for low latency)
         currentFrame = frameQueue.removeLast()
         frameQueue.removeAll()
         
@@ -161,7 +160,6 @@ extension Ultimate64ViewModel: NetworkReceiverDelegate {
     
     nonisolated func networkReceiver(_ receiver: NetworkReceiver, didEncounterError error: Error) {
         // Silently handle errors during normal operation
-        // Could log for debugging if needed
     }
 }
 
@@ -170,6 +168,7 @@ extension Ultimate64ViewModel: AudioReceiverDelegate {
         Task { @MainActor in
             guard !self.isShuttingDown else { return }
             
+            // Process and play audio immediately - no queuing or synchronization delays
             if let processedAudio = self.audioProcessor.processPacket(data) {
                 self.audioPlayer.playAudioData(processedAudio.pcmData)
             }
