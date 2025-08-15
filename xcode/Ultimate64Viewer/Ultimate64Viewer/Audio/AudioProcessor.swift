@@ -5,7 +5,6 @@ class AudioProcessor {
     private var audioBuffer = Data()
     private let lock = NSLock()
     private var hasStarted = false
-    private var packetsProcessed = 0
     
     // Audio format constants
     private let sampleRate = 48000
@@ -17,7 +16,6 @@ class AudioProcessor {
         defer { lock.unlock() }
         
         guard data.count >= 2 else { 
-            print("🎵 AudioProcessor: Packet too small: \(data.count) bytes")
             return nil 
         }
         
@@ -27,23 +25,16 @@ class AudioProcessor {
         if !hasStarted {
             expectedSequenceNumber = header.sequenceNumber
             hasStarted = true
-            print("🎵 AudioProcessor: Started with sequence number: \(header.sequenceNumber)")
         }
         
         // Check for dropped packets
         if header.sequenceNumber != expectedSequenceNumber {
-            print("🎵 AudioProcessor: Gap detected: expected \(expectedSequenceNumber), got \(header.sequenceNumber)")
             expectedSequenceNumber = header.sequenceNumber
         }
         
         // Extract audio data (skip 2-byte header)
         let audioData = data.dropFirst(2)
         audioBuffer.append(audioData)
-        
-        packetsProcessed += 1
-        if packetsProcessed % 100 == 0 {
-            print("🎵 AudioProcessor: Processed \(packetsProcessed) packets, current: \(audioData.count) bytes")
-        }
         
         // Update expected sequence number for next packet
         expectedSequenceNumber = header.sequenceNumber &+ 1

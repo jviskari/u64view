@@ -30,17 +30,13 @@ class AudioReceiver {
     func startReceiving() {
         guard !isReceiving else { return }
         
-        print("🎵 AudioReceiver: Starting to receive on \(multicastGroup):\(port)")
-        
         queue.async { [weak self] in
             do {
                 try self?.setupSocket()
                 try self?.joinMulticastGroup()
                 self?.startListening()
                 self?.isReceiving = true
-                print("🎵 AudioReceiver: Successfully started receiving")
             } catch {
-                print("🎵 AudioReceiver: Failed to start - \(error)")
                 self?.cleanup()
                 DispatchQueue.main.async {
                     self?.delegate?.audioReceiver(self!, didEncounterError: error)
@@ -118,7 +114,6 @@ class AudioReceiver {
         
         if bytesReceived > 0 {
             let data = Data(buffer.prefix(bytesReceived))
-            print("🎵 AudioReceiver: Received \(bytesReceived) bytes")
             
             DispatchQueue.main.async {
                 self.delegate?.audioReceiver(self, didReceivePacket: data)
@@ -126,7 +121,6 @@ class AudioReceiver {
         } else if bytesReceived == -1 {
             let error = errno
             if error != EAGAIN && error != EWOULDBLOCK {
-                print("🎵 AudioReceiver: Receive error - \(error)")
                 DispatchQueue.main.async {
                     self.delegate?.audioReceiver(self, didEncounterError: NetworkError.receiveError)
                 }
@@ -137,7 +131,6 @@ class AudioReceiver {
     func stopReceiving() {
         guard isReceiving else { return }
         
-        print("🎵 AudioReceiver: Stopping")
         isReceiving = false
         source?.cancel()
         source = nil
