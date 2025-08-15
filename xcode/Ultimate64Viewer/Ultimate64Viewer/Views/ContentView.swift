@@ -73,6 +73,12 @@ struct ContentView: View {
                 }
             } else {
                 VStack(spacing: 24) {
+                    // Large SF Symbol at the top
+                    Image(systemName: "tv.and.hifispeaker.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.linearGradient(colors: [.cyan, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .symbolEffect(.pulse.byLayer, options: .repeating.speed(0.5))
+                    
                     // Animated loading indicator with timer-based animation
                     HStack(spacing: 8) {
                         ForEach(0..<3) { index in
