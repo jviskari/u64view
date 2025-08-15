@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var viewModel = Ultimate64ViewModel()
     @State private var animationPhase = 0.0
+    @State private var animationTimer: Timer?
     
     var body: some View {
         ZStack {
@@ -48,7 +49,7 @@ struct ContentView: View {
                 }
             } else {
                 VStack(spacing: 24) {
-                    // Animated loading indicator
+                    // Animated loading indicator with timer-based animation
                     HStack(spacing: 8) {
                         ForEach(0..<3) { index in
                             Circle()
@@ -57,7 +58,6 @@ struct ContentView: View {
                                 .opacity(0.3 + 0.7 * sin(animationPhase + Double(index) * 0.8))
                         }
                     }
-                    .animation(.easeInOut(duration: 1.2).repeatForever(), value: animationPhase)
                     
                     VStack(spacing: 12) {
                         Text(viewModel.isConnected ? "Connection Lost" : "Waiting for Ultimate 64")
@@ -91,19 +91,28 @@ struct ContentView: View {
                             .padding(.horizontal, 40)
                     }
                 }
-                .onAppear {
-                    withAnimation {
-                        animationPhase = .pi * 2
-                    }
-                }
             }
         }
         .onAppear {
             viewModel.startReceiving()
+            startContinuousAnimation()
         }
         .onDisappear {
             viewModel.stopReceiving()
+            stopAnimation()
         }
+    }
+    
+    private func startContinuousAnimation() {
+        stopAnimation() // Stop any existing timer
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            animationPhase += 0.1
+        }
+    }
+    
+    private func stopAnimation() {
+        animationTimer?.invalidate()
+        animationTimer = nil
     }
 }
 
