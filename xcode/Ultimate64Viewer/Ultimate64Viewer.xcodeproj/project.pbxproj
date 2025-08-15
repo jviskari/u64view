@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5285FACB2E4FEA2500C3AD5D /* Property List.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5285FACA2E4FEA2500C3AD5D /* Property List.plist */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		528634522E4F777300A5108A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,6 +28,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		5285FACA2E4FEA2500C3AD5D /* Property List.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Property List.plist"; sourceTree = "<group>"; };
 		528634432E4F777200A5108A /* Ultimate64Viewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Ultimate64Viewer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		528634512E4F777300A5108A /* Ultimate64ViewerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = Ultimate64ViewerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5286345B2E4F777300A5108A /* Ultimate64ViewerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = Ultimate64ViewerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -75,6 +80,7 @@
 		5286343A2E4F777200A5108A = {
 			isa = PBXGroup;
 			children = (
+				5285FACA2E4FEA2500C3AD5D /* Property List.plist */,
 				528634452E4F777200A5108A /* Ultimate64Viewer */,
 				528634542E4F777300A5108A /* Ultimate64ViewerTests */,
 				5286345E2E4F777300A5108A /* Ultimate64ViewerUITests */,
@@ -212,6 +218,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5285FACB2E4FEA2500C3AD5D /* Property List.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -395,6 +402,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 63Y222SMSN;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Ultimate64 Viewer";
@@ -437,6 +445,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 63Y222SMSN;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Ultimate64 Viewer";
