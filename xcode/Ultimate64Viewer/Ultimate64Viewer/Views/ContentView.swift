@@ -60,8 +60,8 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 1.2).repeatForever(), value: animationPhase)
                     
                     VStack(spacing: 12) {
-                        Text("Waiting for Ultimate 64")
-                            .foregroundColor(.white)
+                        Text(viewModel.isConnected ? "Connection Lost" : "Waiting for Ultimate 64")
+                            .foregroundColor(viewModel.isConnected ? .orange : .white)
                             .font(.title2)
                             .fontWeight(.medium)
                         
@@ -74,9 +74,17 @@ struct ContentView: View {
                                 .foregroundColor(.cyan)
                                 .font(.system(.title3, design: .monospaced))
                                 .fontWeight(.semibold)
+                            
+                            if let lastIP = viewModel.sourceIP {
+                                Text("Last connected: \(lastIP)")
+                                    .foregroundColor(.white.opacity(0.5))
+                                    .font(.system(.caption, design: .monospaced))
+                            }
                         }
                         
-                        Text("Configure Ultimate 64 to send video to this multicast address")
+                        Text(viewModel.isConnected ? 
+                             "Reconnecting..." : 
+                             "Configure Ultimate 64 to send video to this multicast address")
                             .foregroundColor(.white.opacity(0.6))
                             .font(.caption)
                             .multilineTextAlignment(.center)
