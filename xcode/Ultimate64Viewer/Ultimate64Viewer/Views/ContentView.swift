@@ -32,13 +32,37 @@ struct ContentView: View {
                             Spacer()
                             VStack(alignment: .trailing, spacing: 4) {
                                 if let sourceIP = viewModel.sourceIP {
-                                    Text("📡 \(sourceIP)")
-                                        .foregroundColor(.green)
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "antenna.radiowaves.left.and.right")
+                                            .foregroundColor(.green)
+                                            .font(.caption)
+                                        Text(sourceIP)
+                                            .foregroundColor(.green)
+                                            .font(.system(.caption, design: .monospaced))
+                                    }
+                                }
+                                
+                                HStack(spacing: 4) {
+                                    Image(systemName: "play.tv")
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .font(.caption)
+                                    Text("Frame \(viewModel.currentFrame?.number ?? 0)")
+                                        .foregroundColor(.white.opacity(0.8))
                                         .font(.system(.caption, design: .monospaced))
                                 }
-                                Text("Frame \(viewModel.currentFrame?.number ?? 0)")
-                                    .foregroundColor(.white.opacity(0.8))
-                                    .font(.system(.caption, design: .monospaced))
+                                
+                                // Show audio indicator when audio is active
+                                if viewModel.isReceivingAudio {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "waveform")
+                                            .foregroundColor(.cyan)
+                                            .font(.caption)
+                                            .symbolEffect(.variableColor.iterative.dimInactiveLayers.nonReversing, options: .repeating)
+                                        Text("Audio")
+                                            .foregroundColor(.cyan)
+                                            .font(.system(.caption, design: .monospaced))
+                                    }
+                                }
                             }
                             .padding(8)
                             .background(Color.black.opacity(0.7))
@@ -70,10 +94,27 @@ struct ContentView: View {
                                 .foregroundColor(.white.opacity(0.7))
                                 .font(.subheadline)
                             
-                            Text("239.0.1.64:11000")
-                                .foregroundColor(.cyan)
-                                .font(.system(.title3, design: .monospaced))
-                                .fontWeight(.semibold)
+                            VStack(spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "play.tv")
+                                        .foregroundColor(.cyan)
+                                        .font(.caption)
+                                    Text("239.0.1.64:11000")
+                                        .foregroundColor(.cyan)
+                                        .font(.system(.title3, design: .monospaced))
+                                        .fontWeight(.semibold)
+                                }
+                                
+                                HStack(spacing: 6) {
+                                    Image(systemName: "waveform")
+                                        .foregroundColor(.purple)
+                                        .font(.caption)
+                                    Text("239.0.1.64:11001")
+                                        .foregroundColor(.purple)
+                                        .font(.system(.title3, design: .monospaced))
+                                        .fontWeight(.semibold)
+                                }
+                            }
                             
                             if let lastIP = viewModel.sourceIP {
                                 Text("Last connected: \(lastIP)")

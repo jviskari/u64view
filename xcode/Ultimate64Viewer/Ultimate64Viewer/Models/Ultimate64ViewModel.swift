@@ -7,6 +7,7 @@ class Ultimate64ViewModel: ObservableObject {
     @Published var sourceIP: String?
     @Published var showConnectionInfo = false
     @Published var isConnected = false
+    @Published var isReceivingAudio = false
     
     nonisolated private let networkReceiver = NetworkReceiver()
     nonisolated private let audioReceiver = AudioReceiver()
@@ -18,10 +19,12 @@ class Ultimate64ViewModel: ObservableObject {
     private var displayTimer: Timer?
     private var connectionInfoTimer: Timer?
     private var timeoutTimer: Timer?
+    private var audioTimeoutTimer: Timer?
     
     private let frameInterval: TimeInterval = 1.0 / 50.0
     private let maxQueueSize = 3
     private let connectionTimeout: TimeInterval = 5.0
+    private let audioTimeout: TimeInterval = 2.0
     
     private var isShuttingDown = false
     
@@ -58,6 +61,7 @@ class Ultimate64ViewModel: ObservableObject {
             self.sourceIP = nil
             self.isConnected = false
             self.showConnectionInfo = false
+            self.isReceivingAudio = false
         }
     }
     
@@ -70,6 +74,9 @@ class Ultimate64ViewModel: ObservableObject {
         
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        
+        audioTimeoutTimer?.invalidate()
+        audioTimeoutTimer = nil
     }
     
     private func startDisplayTimer() {
