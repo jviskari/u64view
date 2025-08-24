@@ -1,0 +1,1 @@
+../../oscar64/bin/oscar64 blinker.c -O3
