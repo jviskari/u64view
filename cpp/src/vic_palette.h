@@ -34,17 +34,51 @@ namespace VICIIPalette {
     // Get RGB components separately (useful for different rendering backends)
     struct RGB {
         uint8_t r, g, b;
+        
+        RGB() : r(0), g(0), b(0) {}
+        RGB(uint8_t red, uint8_t green, uint8_t blue) : r(red), g(green), b(blue) {}
     };
     
     inline RGB getRGB(uint8_t index) {
         const SDL_Color& color = getColor(index);
-        return {color.r, color.g, color.b};
+        return RGB(color.r, color.g, color.b);
+    }
+    
+    // Get RGB components as array (useful for FFmpeg and other APIs)
+    inline void getRGBArray(uint8_t index, uint8_t rgb[3]) {
+        const SDL_Color& color = getColor(index);
+        rgb[0] = color.r;
+        rgb[1] = color.g;
+        rgb[2] = color.b;
     }
     
     // Convert 4-bit pixel pair to two RGB colors
     inline void unpackPixelPair(uint8_t byte, RGB& pixel1, RGB& pixel2) {
         pixel1 = getRGB(byte & 0x0F);        // Lower 4 bits
         pixel2 = getRGB((byte & 0xF0) >> 4); // Upper 4 bits
+    }
+    
+    // Convert 4-bit pixel pair directly to RGB buffer
+    inline void unpackPixelPairToBuffer(uint8_t byte, uint8_t* rgb_buffer, size_t offset) {
+        const SDL_Color& color1 = getColor(byte & 0x0F);
+        const SDL_Color& color2 = getColor((byte & 0xF0) >> 4);
+        
+        rgb_buffer[offset] = color1.r;
+        rgb_buffer[offset + 1] = color1.g;
+        rgb_buffer[offset + 2] = color1.b;
+        
+        rgb_buffer[offset + 3] = color2.r;
+        rgb_buffer[offset + 4] = color2.g;
+        rgb_buffer[offset + 5] = color2.b;
+    }
+    
+    // Get color name for debugging
+    inline const char* getColorName(uint8_t index) {
+        static const char* names[16] = {
+            "Black", "White", "Red", "Cyan", "Purple", "Green", "Blue", "Yellow",
+            "Orange", "Brown", "Light Red", "Dark Grey", "Grey", "Light Green", "Light Blue", "Light Grey"
+        };
+        return names[index & 0x0F];
     }
 }
 

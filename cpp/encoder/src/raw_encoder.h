@@ -5,6 +5,24 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <vector>
+
+// Raw capture file format definitions
+#define RAW_CAPTURE_MAGIC 0x55363452  // "R4U6" in little endian
+#define RAW_CAPTURE_VERSION 1
+
+struct RawCaptureHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t total_video_frames;
+    uint64_t total_audio_packets;
+    uint64_t duration_ms;
+    uint32_t video_width;
+    uint32_t video_height;
+    uint32_t audio_sample_rate;
+    uint32_t audio_channels;
+    uint8_t reserved[32];
+};
 
 struct EncoderConfig {
     enum class Format {
@@ -117,7 +135,7 @@ private:
     bool setupFFmpeg();
     bool setupVideoEncoder();
     bool setupAudioEncoder();
-    bool encodeTestFrame(size_t frame_num);
+    bool encodeRealFrame(const std::vector<uint8_t>& rgb_data);
     bool processVideoFrame(const VideoFrame& frame);
     bool processAudioPacket(const AudioPacket& packet);
     void updateProgress();

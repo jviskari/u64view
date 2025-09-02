@@ -1,14 +1,7 @@
 #include "video_stream_receiver.h"
+#include "vic_palette.h"  // Use centralized palette
 #include <iostream>
 #include <cstring>
-
-// VIC-II palette (RGB values)
-const uint8_t VideoStreamReceiver::vic_palette_[16][3] = {
-    {0x00, 0x00, 0x00}, {0xEF, 0xEF, 0xEF}, {0x8D, 0x2F, 0x34}, {0x6A, 0xD4, 0xCD},
-    {0x98, 0x35, 0xA4}, {0x4C, 0xB4, 0x42}, {0x2C, 0x29, 0xB1}, {0xEF, 0xEF, 0x5D},
-    {0x98, 0x4E, 0x20}, {0x5B, 0x38, 0x00}, {0xD1, 0x67, 0x6D}, {0x4A, 0x4A, 0x4A},
-    {0x7B, 0x7B, 0x7B}, {0x9F, 0xEF, 0x93}, {0x6D, 0x6A, 0xEF}, {0xB2, 0xB2, 0xB2}
-};
 
 VideoStreamReceiver::VideoStreamReceiver()
     : StreamReceiver(Config::Network::MULTICAST_GROUP, Config::Network::VIDEO_PORT),
@@ -121,18 +114,14 @@ void VideoStreamReceiver::convertToRGB(const std::vector<uint8_t>& packet_data,
             size_t pos1 = static_cast<size_t>(y * Config::Video::FRAME_WIDTH + x * 2) * 3;
             size_t pos2 = static_cast<size_t>(y * Config::Video::FRAME_WIDTH + x * 2 + 1) * 3;
             
-            // Set RGB values for pixel 1
+            // Set RGB values for pixel 1 using centralized palette
             if (pos1 + 2 < rgb_output.size()) {
-                rgb_output[pos1] = vic_palette_[pixel1][0];     // R
-                rgb_output[pos1 + 1] = vic_palette_[pixel1][1]; // G
-                rgb_output[pos1 + 2] = vic_palette_[pixel1][2]; // B
+                VICIIPalette::getRGBArray(pixel1, &rgb_output[pos1]);
             }
             
-            // Set RGB values for pixel 2
+            // Set RGB values for pixel 2 using centralized palette
             if (pos2 + 2 < rgb_output.size()) {
-                rgb_output[pos2] = vic_palette_[pixel2][0];     // R
-                rgb_output[pos2 + 1] = vic_palette_[pixel2][1]; // G
-                rgb_output[pos2 + 2] = vic_palette_[pixel2][2]; // B
+                VICIIPalette::getRGBArray(pixel2, &rgb_output[pos2]);
             }
         }
     }

@@ -1,5 +1,6 @@
 #include "raw_encoder.h"
 #include "../src/config.h"
+#include "../../src/vic_palette.h"  // Use centralized palette
 #include <iostream>
 #include <fstream>
 #include <thread>
@@ -20,6 +21,97 @@ extern "C" {
 
 // Global cancellation flag for the encoder
 static std::atomic<bool> should_cancel{false};
+
+// Raw capture file reader
+class RawCaptureReader {
+private:
+    std::ifstream file_;
+    RawCaptureHeader header_;
+    bool has_header_ = false;
+    size_t current_frame_ = 0;
+    
+public:
+    bool open(const std::string& filename) {
+        file_.open(filename, std::ios::binary);
+        if (!file_) {
+            return false;
+        }
+        
+        // Try to read header
+        file_.read(reinterpret_cast<char*>(&header_), sizeof(header_));
+        if (file_.gcount() == sizeof(header_) && 
+            header_.magic == RAW_CAPTURE_MAGIC && 
+            header_.version == RAW_CAPTURE_VERSION) {
+            has_header_ = true;
+            std::cout << "Found valid raw capture header" << std::endl;
+            std::cout << "Total frames: " << header_.total_video_frames << std::endl;
+            std::cout << "Duration: " << header_.duration_ms / 1000.0 << " seconds" << std::endl;
+        } else {
+            // No header, rewind to beginning
+            file_.seekg(0);
+            has_header_ = false;
+            std::cout << "No header found, treating as raw data" << std::endl;
+        }
+        
+        return true;
+    }
+    
+    bool readFrame(std::vector<uint8_t>& rgb_data) {
+        if (!file_) return false;
+        
+        rgb_data.resize(Config::Video::FRAME_WIDTH * Config::Video::FRAME_HEIGHT * 3);
+        
+        // Read frame data - assuming packed 4-bit pixels like in the main viewer
+        const size_t bytes_per_frame = Config::Video::FRAME_WIDTH * Config::Video::FRAME_HEIGHT / 2; // 4 bits per pixel
+        std::vector<uint8_t> frame_data(bytes_per_frame);
+        
+        file_.read(reinterpret_cast<char*>(frame_data.data()), bytes_per_frame);
+        if (static_cast<size_t>(file_.gcount()) != bytes_per_frame) {
+            return false; // End of file or read error
+        }
+        
+        // Convert 4-bit pixels to RGB using centralized VIC-II palette
+        for (int y = 0; y < Config::Video::FRAME_HEIGHT; y++) {
+            for (int x = 0; x < Config::Video::FRAME_WIDTH / 2; x++) {
+                size_t byte_idx = y * (Config::Video::FRAME_WIDTH / 2) + x;
+                if (byte_idx >= frame_data.size()) break;
+                
+                uint8_t byte = frame_data[byte_idx];
+                uint8_t pixel1 = byte & 0x0F;
+                uint8_t pixel2 = (byte & 0xF0) >> 4;
+                
+                // Set RGB values for both pixels using centralized palette
+                size_t rgb_idx1 = (y * Config::Video::FRAME_WIDTH + x * 2) * 3;
+                size_t rgb_idx2 = (y * Config::Video::FRAME_WIDTH + x * 2 + 1) * 3;
+                
+                if (rgb_idx1 + 2 < rgb_data.size()) {
+                    VICIIPalette::getRGBArray(pixel1, &rgb_data[rgb_idx1]);
+                }
+                
+                if (rgb_idx2 + 2 < rgb_data.size()) {
+                    VICIIPalette::getRGBArray(pixel2, &rgb_data[rgb_idx2]);
+                }
+            }
+        }
+        
+        current_frame_++;
+        return true;
+    }
+    
+    size_t getTotalFrames() const {
+        if (has_header_) {
+            return header_.total_video_frames;
+        }
+        // For files without header, we'll count frames during encoding
+        return 0; // Unknown, will be determined during encoding
+    }
+    
+    void close() {
+        if (file_) {
+            file_.close();
+        }
+    }
+};
 
 // Real FFmpeg context
 struct RawEncoder::FFmpegContext {
@@ -51,10 +143,14 @@ struct RawEncoder::FFmpegContext {
     EncoderProgress current_progress;
     std::atomic<bool> is_encoding{false};
     
+    // Raw file reader
+    std::unique_ptr<RawCaptureReader> reader;
+    
     bool initialized = false;
 };
 
 RawEncoder::RawEncoder() : ffmpeg_ctx_(std::make_unique<FFmpegContext>()) {
+    ffmpeg_ctx_->reader = std::make_unique<RawCaptureReader>();
 }
 
 RawEncoder::~RawEncoder() {
@@ -71,6 +167,12 @@ bool RawEncoder::initialize(const EncoderConfig& config) {
     // Validate input file exists
     if (!std::filesystem::exists(config.input_path)) {
         std::cerr << "Input file does not exist: " << config.input_path << std::endl;
+        return false;
+    }
+    
+    // Open raw capture file
+    if (!ffmpeg_ctx_->reader->open(config.input_path)) {
+        std::cerr << "Failed to open raw capture file" << std::endl;
         return false;
     }
     
@@ -386,40 +488,39 @@ bool RawEncoder::encode() {
     
     std::cout << "Starting encoding process..." << std::endl;
     
-    // Analyze input file first
-    auto analysis = analyzeFile(config_.input_path);
-    if (analysis.total_frames == 0) {
-        std::cerr << "No frames found in input file" << std::endl;
-        ctx.is_encoding = false;
-        return false;
-    }
-    
     // Initialize progress
     {
         std::lock_guard<std::mutex> lock(ctx.progress_mutex);
         ctx.current_progress = EncoderProgress{};
-        ctx.current_progress.total_frames = analysis.total_frames;
-        ctx.current_progress.total_audio_packets = analysis.total_audio_packets;
-        ctx.current_progress.duration_seconds = analysis.duration_seconds;
-        ctx.current_progress.input_size_bytes = analysis.input_size_bytes;
+        ctx.current_progress.input_size_bytes = std::filesystem::file_size(config_.input_path);
     }
     
-    std::cout << "Processing " << analysis.total_frames << " frames..." << std::endl;
-    
     auto start_time = std::chrono::high_resolution_clock::now();
+    std::vector<uint8_t> rgb_frame_data;
+    size_t frame_count = 0;
     
-    for (size_t frame = 0; frame < analysis.total_frames && !should_cancel.load(); frame++) {
-        // Create test pattern (for now)
-        if (!encodeTestFrame(frame)) {
-            std::cerr << "Failed to encode frame " << frame << std::endl;
+    // Read and encode frames until end of file
+    while (!should_cancel.load()) {
+        // Read actual frame data from raw file
+        if (!ctx.reader->readFrame(rgb_frame_data)) {
+            std::cout << "End of file reached at frame " << frame_count << std::endl;
+            break;
+        }
+        
+        // Encode the real frame data
+        if (!encodeRealFrame(rgb_frame_data)) {
+            std::cerr << "Failed to encode frame " << frame_count << std::endl;
             ctx.is_encoding = false;
             return false;
         }
         
+        frame_count++;
+        
         // Update progress
         {
             std::lock_guard<std::mutex> lock(ctx.progress_mutex);
-            ctx.current_progress.processed_frames = frame + 1;
+            ctx.current_progress.processed_frames = frame_count;
+            ctx.current_progress.total_frames = frame_count + 100; // Estimate, will be corrected at end
             
             auto now = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
@@ -429,11 +530,11 @@ bool RawEncoder::encode() {
                 ctx.current_progress.fps = (ctx.current_progress.processed_frames * 1000.0) / elapsed.count();
             }
             
-            ctx.current_progress.status_message = "Encoding frame " + std::to_string(frame + 1);
+            ctx.current_progress.status_message = "Encoding frame " + std::to_string(frame_count);
         }
         
-        // Call progress callback
-        if (progress_callback_) {
+        // Call progress callback every 10 frames to avoid too frequent updates
+        if (progress_callback_ && (frame_count % 10 == 0)) {
             std::lock_guard<std::mutex> lock(ctx.progress_mutex);
             progress_callback_(ctx.current_progress);
         }
@@ -451,6 +552,7 @@ bool RawEncoder::encode() {
     // Final progress update
     {
         std::lock_guard<std::mutex> lock(ctx.progress_mutex);
+        ctx.current_progress.total_frames = frame_count; // Correct total
         ctx.current_progress.is_complete = true;
         ctx.current_progress.status_message = "Encoding completed";
         
@@ -474,7 +576,7 @@ bool RawEncoder::encode() {
     return true;
 }
 
-bool RawEncoder::encodeTestFrame(size_t frame_num) {
+bool RawEncoder::encodeRealFrame(const std::vector<uint8_t>& rgb_data) {
     auto& ctx = *ffmpeg_ctx_;
     
     // Make frame writable
@@ -483,21 +585,16 @@ bool RawEncoder::encodeTestFrame(size_t frame_num) {
         return false;
     }
     
-    // Create simple test pattern
-    for (int y = 0; y < ctx.video_codec_ctx->height; y++) {
-        for (int x = 0; x < ctx.video_codec_ctx->width; x++) {
-            // Simple animated pattern
-            int color = (x + y + frame_num) % 256;
-            ctx.video_frame->data[0][y * ctx.video_frame->linesize[0] + x] = color;
-        }
-    }
+    // Convert RGB24 to YUV420P using swscale
+    const uint8_t* src_data[4] = { rgb_data.data(), nullptr, nullptr, nullptr };
+    int src_linesize[4] = { Config::Video::FRAME_WIDTH * 3, 0, 0, 0 };
     
-    // Fill U and V planes with neutral values
-    for (int y = 0; y < ctx.video_codec_ctx->height / 2; y++) {
-        for (int x = 0; x < ctx.video_codec_ctx->width / 2; x++) {
-            ctx.video_frame->data[1][y * ctx.video_frame->linesize[1] + x] = 128;
-            ctx.video_frame->data[2][y * ctx.video_frame->linesize[2] + x] = 128;
-        }
+    ret = sws_scale(ctx.sws_ctx, src_data, src_linesize, 0, Config::Video::FRAME_HEIGHT,
+                    ctx.video_frame->data, ctx.video_frame->linesize);
+    
+    if (ret < 0) {
+        std::cerr << "Error converting RGB to YUV" << std::endl;
+        return false;
     }
     
     ctx.video_frame->pts = ctx.video_pts++;
@@ -565,7 +662,7 @@ bool RawEncoder::validateInputFile(const std::string& path) {
     // Check file extension
     std::filesystem::path file_path(path);
     std::string extension = file_path.extension().string();
-    return extension == ".u64raw";
+    return extension == ".u64raw" || extension == ".raw";
 }
 
 EncoderProgress RawEncoder::analyzeFile(const std::string& path) {
@@ -579,21 +676,40 @@ EncoderProgress RawEncoder::analyzeFile(const std::string& path) {
     
     analysis.input_size_bytes = std::filesystem::file_size(path);
     
-    // Simple estimation based on file size
-    std::cout << "Estimating file contents based on size..." << std::endl;
-    
-    // Rough estimation: assume ~300KB per frame (video + audio)
-    analysis.total_frames = analysis.input_size_bytes / (300 * 1024);
-    if (analysis.total_frames == 0) {
-        analysis.total_frames = 100; // Minimum assumption
+    // Try to read raw capture file header
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        analysis.has_error = true;
+        analysis.error_message = "Cannot open file";
+        return analysis;
     }
     
-    analysis.total_audio_packets = analysis.total_frames * 5; // ~5 audio packets per frame
-    analysis.duration_seconds = analysis.total_frames / 50.0; // 50 FPS
+    // Read raw capture header (if it exists)
+    RawCaptureHeader header;
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
     
-    std::cout << "Estimated " << analysis.total_frames << " frames, " 
-              << analysis.duration_seconds << " seconds" << std::endl;
+    if (file.gcount() == sizeof(header) && 
+        header.magic == RAW_CAPTURE_MAGIC && 
+        header.version == RAW_CAPTURE_VERSION) {
+        
+        // Valid raw capture file
+        analysis.total_frames = header.total_video_frames;
+        analysis.total_audio_packets = header.total_audio_packets;
+        analysis.duration_seconds = header.duration_ms / 1000.0;
+        
+        std::cout << "Valid U64 raw capture file detected" << std::endl;
+    } else {
+        // Estimate based on file size (fallback)
+        std::cout << "Estimating file contents based on size..." << std::endl;
+        
+        // Rough estimation: assume 4-bit pixels (384*272/2 bytes per frame)
+        const size_t bytes_per_frame = Config::Video::FRAME_WIDTH * Config::Video::FRAME_HEIGHT / 2;
+        analysis.total_frames = analysis.input_size_bytes / bytes_per_frame;
+        analysis.total_audio_packets = analysis.total_frames * 5; // ~5 audio packets per frame
+        analysis.duration_seconds = analysis.total_frames / 50.0; // 50 FPS
+    }
     
+    file.close();
     return analysis;
 }
 
@@ -601,63 +717,75 @@ std::vector<std::string> RawEncoder::getSupportedFormats() {
     return {"mp4", "avi", "mov"};
 }
 
-bool RawEncoder::processVideoFrame(const VideoFrame& /* frame */) {
-    // Dummy video frame processing
-    ffmpeg_ctx_->frames_encoded++;
+bool RawEncoder::processVideoFrame(const VideoFrame& frame) {
+    // This method is not used in the real implementation
+    // We use encodeRealFrame instead
     return true;
 }
 
-bool RawEncoder::processAudioPacket(const AudioPacket& /* packet */) {
-    // Dummy audio packet processing
-    ffmpeg_ctx_->audio_samples_encoded++;
+bool RawEncoder::processAudioPacket(const AudioPacket& packet) {
+    // Audio processing would go here
+    // For now, we're only encoding video
     return true;
 }
 
 void RawEncoder::updateProgress() {
-    // Update progress tracking
+    // Progress is updated in the main encode loop
 }
 
 void RawEncoder::cleanup() {
-    if (!ffmpeg_ctx_) return;
-    
-    auto& ctx = *ffmpeg_ctx_;
-    ctx.is_encoding = false;
-    
-    // Clean up video resources
-    if (ctx.video_frame) {
-        av_frame_free(&ctx.video_frame);
-    }
-    if (ctx.video_packet) {
-        av_packet_free(&ctx.video_packet);
-    }
-    if (ctx.video_codec_ctx) {
-        avcodec_free_context(&ctx.video_codec_ctx);
-    }
-    if (ctx.sws_ctx) {
-        sws_freeContext(ctx.sws_ctx);
-    }
-    
-    // Clean up audio resources
-    if (ctx.audio_frame) {
-        av_frame_free(&ctx.audio_frame);
-    }
-    if (ctx.audio_packet) {
-        av_packet_free(&ctx.audio_packet);
-    }
-    if (ctx.audio_codec_ctx) {
-        avcodec_free_context(&ctx.audio_codec_ctx);
-    }
-    if (ctx.swr_ctx) {
-        swr_free(&ctx.swr_ctx);
-    }
-    
-    // Clean up format context
-    if (ctx.format_ctx) {
-        if (ctx.format_ctx->pb) {
-            avio_closep(&ctx.format_ctx->pb);
+    if (ffmpeg_ctx_) {
+        auto& ctx = *ffmpeg_ctx_;
+        
+        // Close reader
+        if (ctx.reader) {
+            ctx.reader->close();
         }
-        avformat_free_context(ctx.format_ctx);
+        
+        // Clean up video resources
+        if (ctx.sws_ctx) {
+            sws_freeContext(ctx.sws_ctx);
+            ctx.sws_ctx = nullptr;
+        }
+        
+        if (ctx.video_packet) {
+            av_packet_free(&ctx.video_packet);
+        }
+        
+        if (ctx.video_frame) {
+            av_frame_free(&ctx.video_frame);
+        }
+        
+        if (ctx.video_codec_ctx) {
+            avcodec_free_context(&ctx.video_codec_ctx);
+        }
+        
+        // Clean up audio resources
+        if (ctx.swr_ctx) {
+            swr_free(&ctx.swr_ctx);
+        }
+        
+        if (ctx.audio_packet) {
+            av_packet_free(&ctx.audio_packet);
+        }
+        
+        if (ctx.audio_frame) {
+            av_frame_free(&ctx.audio_frame);
+        }
+        
+        if (ctx.audio_codec_ctx) {
+            avcodec_free_context(&ctx.audio_codec_ctx);
+        }
+        
+        // Clean up format context
+        if (ctx.format_ctx) {
+            if (!(ctx.format_ctx->oformat->flags & AVFMT_NOFILE)) {
+                avio_closep(&ctx.format_ctx->pb);
+            }
+            avformat_free_context(ctx.format_ctx);
+            ctx.format_ctx = nullptr;
+        }
+        
+        ctx.initialized = false;
     }
-    
-    ctx.initialized = false;
 }
