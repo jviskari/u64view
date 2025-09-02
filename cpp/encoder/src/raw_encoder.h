@@ -115,6 +115,9 @@ public:
     
 private:
     bool setupFFmpeg();
+    bool setupVideoEncoder();
+    bool setupAudioEncoder();
+    bool encodeTestFrame(size_t frame_num);
     bool processVideoFrame(const VideoFrame& frame);
     bool processAudioPacket(const AudioPacket& packet);
     void updateProgress();

@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <signal.h>
 #include <thread>
+#include <atomic>
 
 std::atomic<bool> should_cancel{false};
 
@@ -163,6 +164,11 @@ int main(int argc, char* argv[]) {
     std::cout << "Analyzing input file..." << std::endl;
     auto analysis = RawEncoder::analyzeFile(input_file);
     
+    if (analysis.has_error) {
+        std::cerr << "Error analyzing file: " << analysis.error_message << std::endl;
+        return 1;
+    }
+    
     std::cout << "Input file: " << input_file << std::endl;
     std::cout << "Duration: " << analysis.duration_seconds << " seconds" << std::endl;
     std::cout << "Video frames: " << analysis.total_frames << std::endl;
@@ -186,36 +192,30 @@ int main(int argc, char* argv[]) {
     
     std::cout << "Starting encoding..." << std::endl;
     
-    // Start encoding
-    if (!encoder.encodeAsync()) {
-        std::cerr << "Error: Failed to start encoding\n";
+    // Use synchronous encoding instead of async
+    bool success = encoder.encode();
+    
+    std::cout << std::endl; // New line after progress
+    
+    if (should_cancel.load()) {
+        std::cout << "Encoding cancelled.\n";
         return 1;
     }
     
-    // Wait for completion or cancellation
-    while (encoder.isEncoding() && !should_cancel.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    
-    if (should_cancel.load()) {
-        encoder.cancel();
-        std::cout << "\nEncoding cancelled.\n";
+    if (!success) {
+        std::cerr << "Encoding failed!" << std::endl;
         return 1;
     }
     
     auto final_progress = encoder.getProgress();
-    std::cout << std::endl;
-    
-    if (final_progress.has_error) {
-        std::cerr << "Encoding failed: " << final_progress.error_message << std::endl;
-        return 1;
-    }
     
     std::cout << "Encoding completed successfully!" << std::endl;
     std::cout << "Output file: " << output_file << std::endl;
     std::cout << "Output size: " << (final_progress.output_size_bytes / 1024 / 1024) << " MB" << std::endl;
-    std::cout << "Compression ratio: " << std::fixed << std::setprecision(1) 
-              << final_progress.compression_ratio << ":1" << std::endl;
+    if (final_progress.compression_ratio > 0) {
+        std::cout << "Compression ratio: " << std::fixed << std::setprecision(1) 
+                  << final_progress.compression_ratio << ":1" << std::endl;
+    }
     
     return 0;
 }
