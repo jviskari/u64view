@@ -67,14 +67,22 @@ endif()
 
 # Include directories
 include_directories(${SDL2_INCLUDE_DIRS})
+include_directories(src)
 
 # Add library directories
 if(SDL2_LIBRARY_DIRS)
     link_directories(${SDL2_LIBRARY_DIRS})
 endif()
 
-# Add executable
-add_executable(Ultimate64Viewer src/main.cpp)
+# Add executable with all source files
+add_executable(Ultimate64Viewer 
+    src/main.cpp
+    src/stream_receiver.cpp
+    src/audio_stream_receiver.cpp
+    src/video_stream_receiver.cpp
+    src/av_synchronizer.cpp
+    src/ultimate64_viewer.cpp
+)
 
 # Link libraries
 target_link_libraries(Ultimate64Viewer ${SDL2_LIBRARIES})
@@ -102,6 +110,13 @@ endif()
 # Set compiler flags
 if(SDL2_CFLAGS_OTHER)
     target_compile_options(Ultimate64Viewer PRIVATE ${SDL2_CFLAGS_OTHER})
+endif()
+
+# Add compiler warnings
+if(MSVC)
+    target_compile_options(Ultimate64Viewer PRIVATE /W4)
+else()
+    target_compile_options(Ultimate64Viewer PRIVATE -Wall -Wextra -pedantic)
 endif()
 
 # For debug builds
