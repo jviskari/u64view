@@ -2,79 +2,62 @@
 #define VIDEO_STREAM_RECEIVER_H
 
 #include "stream_receiver.h"
+#include "stream_types.h"
 #include "config.h"
-#include <SDL.h>
 #include <queue>
 #include <mutex>
-#include <vector>
 #include <map>
-#include <chrono>
-
-struct VideoPacketHeader {
-    uint16_t seq;    // Sequence number
-    uint16_t frm;    // Frame number
-    uint16_t lin;    // Line number
-    uint16_t width;  // Width
-    uint8_t lp;      // Lines per packet
-    uint8_t bp;      // Bytes per line
-    uint16_t enc;    // Encoding
-};
-
-struct VideoFrame {
-    uint16_t frame_num;
-    std::vector<uint8_t> rgb_data; // RGB format for SDL
-    std::chrono::high_resolution_clock::time_point receive_time;
-    bool is_complete;
-    
-    VideoFrame() : frame_num(0), is_complete(false) {
-        rgb_data.resize(Config::Video::FRAME_WIDTH * Config::Video::FRAME_HEIGHT * 3, 0);
-    }
-};
+#include <atomic>
 
 class VideoStreamReceiver : public StreamReceiver {
 private:
-    std::queue<VideoFrame> frame_queue;
-    std::mutex frame_mutex;
-    
     // Frame assembly
-    std::map<uint16_t, std::map<uint16_t, std::vector<uint8_t>>> incomplete_frames; // [frame_num][line_num] -> packet_data
-    std::mutex assembly_mutex;
+    struct FrameData {
+        std::map<uint16_t, std::vector<uint8_t>> packets; // line_num -> packet_data
+        std::chrono::high_resolution_clock::time_point first_packet_time;
+        bool complete = false;
+    };
+    
+    std::map<uint16_t, FrameData> frames_in_progress_;
+    std::queue<VideoFrame> completed_frames_;
+    std::mutex frames_mutex_;
     
     // Statistics
-    uint16_t last_frame_num;
-    size_t dropped_frames;
-    size_t total_frames;
-    size_t total_packets;
-    std::chrono::high_resolution_clock::time_point last_receive_time;
-    std::chrono::high_resolution_clock::time_point stats_time;
+    std::atomic<uint16_t> last_frame_num_;
+    std::atomic<size_t> frames_completed_;
+    std::atomic<size_t> frames_dropped_;
+    std::atomic<size_t> packets_received_;
+    
+    // VIC-II palette for RGB conversion
+    static const uint8_t vic_palette_[16][3];
     
 public:
     VideoStreamReceiver();
-    ~VideoStreamReceiver();
+    ~VideoStreamReceiver() override;
     
     bool initialize() override;
     void start() override;
     void stop() override;
     
     // Frame access
-    bool hasFrame();
+    bool hasFrame() const;
     VideoFrame getNextFrame();
-    size_t getQueueSize();
+    size_t getFrameQueueSize() const;
     
     // Statistics
-    std::chrono::high_resolution_clock::time_point getLastReceiveTime() const { return last_receive_time; }
-    size_t getDroppedFrameCount() const { return dropped_frames; }
-    size_t getTotalFrameCount() const { return total_frames; }
-    size_t getTotalPacketCount() const { return total_packets; }
+    size_t getFramesCompleted() const { return frames_completed_.load(); }
+    size_t getFramesDropped() const { return frames_dropped_.load(); }
+    size_t getPacketsReceived() const { return packets_received_.load(); }
     
 protected:
     void processPacket(const char* data, size_t size) override;
     
 private:
-    void assembleFrame(uint16_t frame_num, const std::map<uint16_t, std::vector<uint8_t>>& packets);
-    void convertPixelsToRGB(const std::vector<uint8_t>& pixel_data, std::vector<uint8_t>& rgb_data, int start_y);
+    void assembleFrame(uint16_t frame_num, const FrameData& frame_data);
+    void convertToRGB(const std::vector<uint8_t>& packet_data, 
+                     std::vector<uint8_t>& rgb_output, 
+                     int start_line);
     void cleanupOldFrames();
-    void printStats();
 };
 
 #endif // VIDEO_STREAM_RECEIVER_H

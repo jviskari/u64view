@@ -1,16 +1,9 @@
 #include "ultimate64_viewer.h"
-#include "config.h"
+#include "raw_capture.h"
 #include <iostream>
-#include <thread>
-#include <cstring>
-
-#ifdef _WIN32
-    #include <winsock2.h>
-    #pragma comment(lib, "ws2_32.lib")
-#endif
 
 Ultimate64Viewer::Ultimate64Viewer() 
-    : window(nullptr), renderer(nullptr), video_texture(nullptr),
+    : window(nullptr), renderer(nullptr), texture(nullptr), 
       running(true), has_current_frame(false) {
 }
 
@@ -51,170 +44,203 @@ bool Ultimate64Viewer::initialize() {
         return false;
     }
     
-    // Create video texture
-    video_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, 
-                                    SDL_TEXTUREACCESS_STREAMING, 
-                                    Config::Video::FRAME_WIDTH, Config::Video::FRAME_HEIGHT);
-    if (!video_texture) {
-        std::cerr << "Video texture could not be created! SDL_Error: " << SDL_GetError() << std::endl;
+    // Create texture
+    texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, 
+                              SDL_TEXTUREACCESS_STREAMING, 
+                              Config::Video::FRAME_WIDTH, Config::Video::FRAME_HEIGHT);
+    if (!texture) {
+        std::cerr << "Texture could not be created! SDL_Error: " << SDL_GetError() << std::endl;
         return false;
     }
     
-    // Initialize stream receivers
-    video_receiver = std::make_unique<VideoStreamReceiver>();
-    if (!video_receiver->initialize()) {
-        std::cerr << "Failed to initialize video receiver" << std::endl;
-        return false;
-    }
-    
+    // Initialize receivers
     audio_receiver = std::make_unique<AudioStreamReceiver>();
     if (!audio_receiver->initialize()) {
         std::cerr << "Failed to initialize audio receiver" << std::endl;
         return false;
     }
     
-    // Initialize synchronizer
-    av_sync = std::make_unique<AVSynchronizer>();
+    video_receiver = std::make_unique<VideoStreamReceiver>();
+    if (!video_receiver->initialize()) {
+        std::cerr << "Failed to initialize video receiver" << std::endl;
+        return false;
+    }
     
-    stats_time = std::chrono::high_resolution_clock::now();
-    last_frame_time = std::chrono::high_resolution_clock::now();
-    
-    std::cout << "Ultimate 64 Viewer initialized successfully" << std::endl;
+    return true;
+}
+
+void Ultimate64Viewer::run() {
     std::cout << "Starting Ultimate 64 Viewer" << std::endl;
-    std::cout << "Video: " << Config::Network::MULTICAST_GROUP << ":" << Config::Network::VIDEO_PORT << std::endl;
-    std::cout << "Audio: " << Config::Network::MULTICAST_GROUP << ":" << Config::Network::AUDIO_PORT << std::endl;
-    std::cout << "Press ESC to exit or Ctrl+C" << std::endl;
+    std::cout << "Listening for video on " << Config::Network::MULTICAST_GROUP 
+              << ":" << Config::Network::VIDEO_PORT << std::endl;
+    std::cout << "Listening for audio on " << Config::Network::MULTICAST_GROUP 
+              << ":" << Config::Network::AUDIO_PORT << std::endl;
+    std::cout << "Press ESC to exit, C to start/stop capture" << std::endl;
     
     // Start receivers
-    video_receiver->start();
     audio_receiver->start();
+    video_receiver->start();
     
-    return true;
-}
-
-bool Ultimate64Viewer::runOnce() {
-    if (!running.load()) {
-        return false;
-    }
-    
-    auto now = std::chrono::high_resolution_clock::now();
-    
-    // Handle events - this is critical for responsiveness
-    handleEvents();
-    
-    // Check if we should exit
-    if (!running.load()) {
-        return false;
-    }
-    
-    // Update display at consistent intervals
-    const auto frame_interval = std::chrono::microseconds(20000); // 50Hz = 20ms
-    if (now - last_frame_time >= frame_interval) {
-        updateDisplay();
-        last_frame_time = now;
-    }
-    
-    // Show stats periodically
-    if (Config::Debug::SHOW_SYNC_INFO) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - stats_time);
-        if (elapsed.count() >= 5) {
-            showStats();
-            stats_time = now;
-        }
-    }
-    
-    return true;
-}
-
-void Ultimate64Viewer::handleEvents() {
     SDL_Event e;
-    while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_QUIT) {
-            std::cout << "\nWindow close requested" << std::endl;
-            running = false;
-        } else if (e.type == SDL_KEYDOWN) {
-            if (e.key.keysym.sym == SDLK_ESCAPE) {
-                std::cout << "\nESC pressed - exiting" << std::endl;
+    auto last_stats_time = std::chrono::high_resolution_clock::now();
+    
+    while (running) {
+        // Handle events
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT || 
+                (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)) {
                 running = false;
+            } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_c) {
+                // Toggle capture
+                if (isCapturing()) {
+                    stopRawCapture();
+                } else {
+                    std::string filename = "capture_" + 
+                        std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count()) + 
+                        ".u64raw";
+                    startRawCapture(filename);
+                }
             }
         }
+        
+        updateDisplay();
+        
+        // Print periodic stats
+        auto now = std::chrono::high_resolution_clock::now();
+        auto stats_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_stats_time);
+        if (stats_elapsed.count() >= 5) {
+            std::cout << "\nVideo frames: " << video_receiver->getFramesCompleted()
+                      << ", Audio queue: " << audio_receiver->getQueueSize();
+            if (isCapturing()) {
+                std::cout << ", " << getCaptureStatus();
+            }
+            std::cout << std::endl;
+            last_stats_time = now;
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
     }
 }
 
 void Ultimate64Viewer::updateDisplay() {
-    // Update sync timestamps (but don't let sync block display)
-    auto video_last = video_receiver->getLastReceiveTime();
-    auto audio_last = audio_receiver->getLastReceiveTime();
-    
-    if (video_last > std::chrono::high_resolution_clock::time_point{}) {
-        av_sync->updateVideoTimestamp();
-    }
-    if (audio_last > std::chrono::high_resolution_clock::time_point{}) {
-        av_sync->updateAudioTimestamp();
-    }
-    
-    // Get new frame if available - simplified logic to avoid blocking
-    if (video_receiver->hasFrame()) {
-        VideoFrame new_frame = video_receiver->getNextFrame();
-        if (new_frame.is_complete) {
-            current_frame = new_frame;
-            has_current_frame = true;
-            av_sync->frameDisplayed(new_frame.frame_num);
+    // Get latest video frame
+    while (video_receiver->hasFrame()) {
+        current_frame = video_receiver->getNextFrame();
+        has_current_frame = true;
+        
+        // Feed to capture if active
+        if (capture_device_ && capture_device_->isCapturing()) {
+            capture_device_->addVideoFrame(current_frame);
         }
     }
     
-    // Always display something
+    // Feed audio to capture if active
+    if (capture_device_ && capture_device_->isCapturing()) {
+        while (audio_receiver->hasPacket()) {
+            AudioPacket packet = audio_receiver->getNextPacket();
+            capture_device_->addAudioPacket(packet);
+        }
+    }
+    
+    // Display current frame
     if (has_current_frame) {
         displayFrame(current_frame);
     } else {
-        // Show "waiting for signal" screen
-        SDL_SetRenderDrawColor(renderer, 32, 32, 32, 255);
+        // Clear screen if no frame
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderPresent(renderer);
     }
 }
 
 void Ultimate64Viewer::displayFrame(const VideoFrame& frame) {
-    // Update texture with RGB data
+    // Update texture
     void* pixels;
     int pitch;
-    if (SDL_LockTexture(video_texture, nullptr, &pixels, &pitch) == 0) {
-        std::memcpy(pixels, frame.rgb_data.data(), frame.rgb_data.size());
-        SDL_UnlockTexture(video_texture);
-        
-        // Render
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, video_texture, nullptr, nullptr);
-        SDL_RenderPresent(renderer);
+    SDL_LockTexture(texture, nullptr, &pixels, &pitch);
+    
+    // Copy RGB data
+    const uint8_t* src = frame.rgb_data.data();
+    uint8_t* dst = static_cast<uint8_t*>(pixels);
+    
+    for (int y = 0; y < Config::Video::FRAME_HEIGHT; y++) {
+        memcpy(dst + y * pitch, 
+               src + y * Config::Video::FRAME_WIDTH * 3, 
+               Config::Video::FRAME_WIDTH * 3);
+    }
+    
+    SDL_UnlockTexture(texture);
+    
+    // Render
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+    
+    // Show capture indicator
+    if (isCapturing()) {
+        SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); // Red dot
+        SDL_Rect dot = {10, 10, 20, 20};
+        SDL_RenderFillRect(renderer, &dot);
+    }
+    
+    SDL_RenderPresent(renderer);
+}
+
+bool Ultimate64Viewer::startRawCapture(const std::string& filename, CaptureConfig::Mode mode) {
+    if (capture_device_ && capture_device_->isCapturing()) {
+        std::cerr << "Already capturing!" << std::endl;
+        return false;
+    }
+    
+    capture_device_ = std::make_unique<RawCapture>();
+    
+    CaptureConfig config;
+    config.output_path = filename;
+    config.mode = mode;
+    config.capture_video = true;
+    config.capture_audio = true;
+    config.sync_av = true;
+    
+    if (!capture_device_->initialize(config)) {
+        capture_device_.reset();
+        return false;
+    }
+    
+    if (!capture_device_->startCapture()) {
+        capture_device_.reset();
+        return false;
+    }
+    
+    std::cout << "Started RAW capture to: " << filename << std::endl;
+    return true;
+}
+
+void Ultimate64Viewer::stopRawCapture() {
+    if (capture_device_) {
+        capture_device_->stopCapture();
+        capture_device_.reset();
+        std::cout << "Stopped RAW capture" << std::endl;
     }
 }
 
-void Ultimate64Viewer::showStats() {
-    std::cout << "\n=== Ultimate 64 Viewer Stats ===" << std::endl;
-    std::cout << "Video - Frames: " << video_receiver->getTotalFrameCount()
-              << ", Dropped: " << video_receiver->getDroppedFrameCount()
-              << ", Queue: " << video_receiver->getQueueSize() << std::endl;
-    std::cout << "Audio - Packets: " << audio_receiver->getTotalPacketCount()
-              << ", Dropped: " << audio_receiver->getDroppedPacketCount()
-              << ", Queue: " << audio_receiver->getQueueSize() << std::endl;
-    
-    if (av_sync->isInitialized()) {
-        std::cout << "Sync - Drift: " << av_sync->getAVDriftMs() << "ms"
-                  << ", In Sync: " << (av_sync->isInSync() ? "YES" : "NO") << std::endl;
-    } else {
-        std::cout << "Sync - Not initialized yet" << std::endl;
+bool Ultimate64Viewer::isCapturing() const {
+    return capture_device_ && capture_device_->isCapturing();
+}
+
+std::string Ultimate64Viewer::getCaptureStatus() const {
+    if (capture_device_) {
+        return capture_device_->getStatusString();
     }
+    return "Not capturing";
 }
 
 void Ultimate64Viewer::cleanup() {
     running = false;
     
-    std::cout << "Stopping receivers..." << std::endl;
-    
-    if (video_receiver) {
-        video_receiver->stop();
-        video_receiver.reset();
+    if (capture_device_) {
+        capture_device_->stopCapture();
+        capture_device_.reset();
     }
     
     if (audio_receiver) {
@@ -222,11 +248,14 @@ void Ultimate64Viewer::cleanup() {
         audio_receiver.reset();
     }
     
-    av_sync.reset();
+    if (video_receiver) {
+        video_receiver->stop();
+        video_receiver.reset();
+    }
     
-    if (video_texture) {
-        SDL_DestroyTexture(video_texture);
-        video_texture = nullptr;
+    if (texture) {
+        SDL_DestroyTexture(texture);
+        texture = nullptr;
     }
     
     if (renderer) {
@@ -244,6 +273,4 @@ void Ultimate64Viewer::cleanup() {
 #ifdef _WIN32
     WSACleanup();
 #endif
-    
-    std::cout << "Cleanup complete" << std::endl;
 }

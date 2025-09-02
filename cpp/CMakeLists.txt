@@ -74,15 +74,29 @@ if(SDL2_LIBRARY_DIRS)
     link_directories(${SDL2_LIBRARY_DIRS})
 endif()
 
-# Add executable with all source files
-add_executable(Ultimate64Viewer 
+# Source files
+set(SOURCES
     src/main.cpp
+    src/ultimate64_viewer.cpp
     src/stream_receiver.cpp
     src/audio_stream_receiver.cpp
     src/video_stream_receiver.cpp
-    src/av_synchronizer.cpp
-    src/ultimate64_viewer.cpp
+    src/raw_capture.cpp
 )
+
+# Headers
+set(HEADERS
+    src/config.h
+    src/stream_types.h
+    src/stream_receiver.h
+    src/audio_stream_receiver.h
+    src/video_stream_receiver.h
+    src/capture_interface.h
+    src/raw_capture.h
+)
+
+# Add executable with all source files
+add_executable(Ultimate64Viewer ${SOURCES})
 
 # Link libraries
 target_link_libraries(Ultimate64Viewer ${SDL2_LIBRARIES})
@@ -125,3 +139,24 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 # Install target
 install(TARGETS Ultimate64Viewer DESTINATION bin)
+
+# Capture test executable
+add_executable(CaptureTest 
+    src/capture_test.cpp
+    src/stream_receiver.cpp
+    src/audio_stream_receiver.cpp
+    src/video_stream_receiver.cpp
+    src/raw_capture.cpp
+)
+
+target_link_libraries(CaptureTest ${SDL2_LIBRARIES})
+
+if(APPLE)
+    target_link_libraries(CaptureTest 
+        "-framework Cocoa"
+        "-framework IOKit"
+        "-framework CoreVideo"
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+    )
+endif()

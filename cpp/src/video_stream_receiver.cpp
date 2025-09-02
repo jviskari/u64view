@@ -1,12 +1,18 @@
 #include "video_stream_receiver.h"
-#include "vic_palette.h"
 #include <iostream>
 #include <cstring>
-#include <algorithm>
+
+// VIC-II palette (RGB values)
+const uint8_t VideoStreamReceiver::vic_palette_[16][3] = {
+    {0x00, 0x00, 0x00}, {0xEF, 0xEF, 0xEF}, {0x8D, 0x2F, 0x34}, {0x6A, 0xD4, 0xCD},
+    {0x98, 0x35, 0xA4}, {0x4C, 0xB4, 0x42}, {0x2C, 0x29, 0xB1}, {0xEF, 0xEF, 0x5D},
+    {0x98, 0x4E, 0x20}, {0x5B, 0x38, 0x00}, {0xD1, 0x67, 0x6D}, {0x4A, 0x4A, 0x4A},
+    {0x7B, 0x7B, 0x7B}, {0x9F, 0xEF, 0x93}, {0x6D, 0x6A, 0xEF}, {0xB2, 0xB2, 0xB2}
+};
 
 VideoStreamReceiver::VideoStreamReceiver()
     : StreamReceiver(Config::Network::MULTICAST_GROUP, Config::Network::VIDEO_PORT),
-      last_frame_num(0), dropped_frames(0), total_frames(0), total_packets(0) {
+      last_frame_num_(0), frames_completed_(0), frames_dropped_(0), packets_received_(0) {
 }
 
 VideoStreamReceiver::~VideoStreamReceiver() {
@@ -14,201 +20,155 @@ VideoStreamReceiver::~VideoStreamReceiver() {
 }
 
 bool VideoStreamReceiver::initialize() {
-    if (!setupMulticastSocket()) {
-        return false;
-    }
-    
-    std::cout << "Video receiver initialized for " << Config::Video::FRAME_WIDTH 
-              << "x" << Config::Video::FRAME_HEIGHT << " @ " << Config::Video::FRAME_RATE << "Hz" << std::endl;
-    
-    stats_time = std::chrono::high_resolution_clock::now();
-    return true;
+    return setupMulticastSocket();
 }
 
 void VideoStreamReceiver::start() {
     StreamReceiver::start();
-    std::cout << "Video receiver started" << std::endl;
+    std::cout << "Video stream receiver started on " 
+              << Config::Network::MULTICAST_GROUP << ":" 
+              << Config::Network::VIDEO_PORT << std::endl;
 }
 
 void VideoStreamReceiver::stop() {
     StreamReceiver::stop();
     
-    // Clear queues
-    std::lock_guard<std::mutex> frame_lock(frame_mutex);
-    std::lock_guard<std::mutex> assembly_lock(assembly_mutex);
-    
-    while (!frame_queue.empty()) {
-        frame_queue.pop();
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    frames_in_progress_.clear();
+    while (!completed_frames_.empty()) {
+        completed_frames_.pop();
     }
-    incomplete_frames.clear();
 }
 
 void VideoStreamReceiver::processPacket(const char* data, size_t size) {
-    if (size < sizeof(VideoPacketHeader)) return;
+    if (size < 12) return; // Need at least header
     
-    total_packets++;
-    last_receive_time = std::chrono::high_resolution_clock::now();
+    packets_received_++;
     
-    // Parse header
-    VideoPacketHeader header;
+    // Parse packet header (assuming same format as main.cpp)
+    struct PacketHeader {
+        uint16_t seq;
+        uint16_t frm;
+        uint16_t lin;
+        uint16_t width;
+        uint8_t lp;
+        uint8_t bp;
+        uint16_t enc;
+    } __attribute__((packed));
+    
+    PacketHeader header;
     std::memcpy(&header, data, sizeof(header));
     
-    // Extract pixel data (skip header)
-    const char* pixel_data = data + sizeof(VideoPacketHeader);
-    size_t pixel_data_size = size - sizeof(VideoPacketHeader);
+    // Extract pixel data
+    std::vector<uint8_t> pixel_data(data + sizeof(header), data + size);
     
-    if (pixel_data_size == 0) return;
+    std::lock_guard<std::mutex> lock(frames_mutex_);
     
-    // Store packet data for frame assembly
-    {
-        std::lock_guard<std::mutex> lock(assembly_mutex);
-        
-        // Store packet data
-        std::vector<uint8_t> packet_pixels(pixel_data, pixel_data + pixel_data_size);
-        incomplete_frames[header.frm][header.lin] = packet_pixels;
-        
-        // Check if frame is complete (expecting 68 packets per frame)
-        if (incomplete_frames[header.frm].size() >= Config::Video::PACKETS_PER_FRAME) {
-            assembleFrame(header.frm, incomplete_frames[header.frm]);
-            incomplete_frames.erase(header.frm);
-        }
-        
-        // Clean up old incomplete frames periodically
-        if (total_packets % 100 == 0) {
-            cleanupOldFrames();
-        }
+    // Get or create frame data
+    auto& frame_data = frames_in_progress_[header.frm];
+    if (frame_data.packets.empty()) {
+        frame_data.first_packet_time = std::chrono::high_resolution_clock::now();
     }
     
-    // Print stats periodically
-    if (Config::Debug::SHOW_PACKET_STATS) {
-        auto now = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - stats_time);
-        if (elapsed.count() >= Config::Debug::STATS_UPDATE_INTERVAL_MS) {
-            printStats();
-            stats_time = now;
-        }
+    // Store packet
+    frame_data.packets[header.lin] = pixel_data;
+    
+    // Check if frame is complete
+    if (frame_data.packets.size() >= Config::Video::PACKETS_PER_FRAME) {
+        assembleFrame(header.frm, frame_data);
+        frames_in_progress_.erase(header.frm);
+        frames_completed_++;
     }
+    
+    // Cleanup old incomplete frames
+    cleanupOldFrames();
 }
 
-void VideoStreamReceiver::assembleFrame(uint16_t frame_num, const std::map<uint16_t, std::vector<uint8_t>>& packets) {
+void VideoStreamReceiver::assembleFrame(uint16_t frame_num, const FrameData& frame_data) {
     VideoFrame frame;
     frame.frame_num = frame_num;
-    frame.receive_time = std::chrono::high_resolution_clock::now();
+    frame.receive_time = frame_data.first_packet_time;
+    frame.rgb_data.resize(Config::Video::FRAME_WIDTH * Config::Video::FRAME_HEIGHT * 3);
     
-    // Sort packets by line number and convert to RGB
-    int current_y = 0;
-    for (const auto& [line_num, packet_data] : packets) {
-        if (current_y >= Config::Video::FRAME_HEIGHT) break;
-        
-        convertPixelsToRGB(packet_data, frame.rgb_data, current_y);
-        current_y += 4; // Each packet contains 4 lines
+    // Convert packets to RGB
+    int line = 0;
+    for (const auto& [line_num, packet_data] : frame_data.packets) {
+        convertToRGB(packet_data, frame.rgb_data, line * 4); // 4 lines per packet
+        line++;
+        if (line * 4 >= Config::Video::FRAME_HEIGHT) break;
     }
     
-    frame.is_complete = (current_y >= Config::Video::FRAME_HEIGHT);
-    
-    // Check for dropped frames
-    if (total_frames > 0) {
-        uint16_t expected_next = (last_frame_num + 1) & 0xFFFF;
-        if (frame_num != expected_next && frame_num != last_frame_num) {
-            dropped_frames++;
-            if (Config::Debug::SHOW_PACKET_STATS) {
-                std::cout << "F" << std::flush; // Frame drop indicator
-            }
-        }
+    // Add to completed frames queue
+    if (completed_frames_.size() >= Config::Video::MAX_FRAME_QUEUE_SIZE) {
+        completed_frames_.pop(); // Remove oldest
+        frames_dropped_++;
     }
-    last_frame_num = frame_num;
-    total_frames++;
-    
-    // Add to queue
-    {
-        std::lock_guard<std::mutex> lock(frame_mutex);
-        if (frame_queue.size() >= Config::Video::MAX_FRAME_QUEUE_SIZE) {
-            frame_queue.pop(); // Remove oldest frame
-        }
-        frame_queue.push(frame);
-    }
+    completed_frames_.push(frame);
 }
 
-void VideoStreamReceiver::convertPixelsToRGB(const std::vector<uint8_t>& pixel_data, std::vector<uint8_t>& rgb_data, int start_y) {
+void VideoStreamReceiver::convertToRGB(const std::vector<uint8_t>& packet_data, 
+                                      std::vector<uint8_t>& rgb_output, 
+                                      int start_line) {
     size_t pixel_index = 0;
     
-    // Each packet contains 4 lines of data
-    for (int line = 0; line < 4 && (start_y + line) < Config::Video::FRAME_HEIGHT; ++line) {
-        int y = start_y + line;
-        
-        // Each line has 192 bytes (384 pixels / 2 pixels per byte)
-        for (int x = 0; x < 192 && x < Config::Video::FRAME_WIDTH / 2; ++x) {
-            if (pixel_index >= pixel_data.size()) break;
+    for (int line = 0; line < 4 && (start_line + line) < Config::Video::FRAME_HEIGHT; line++) {
+        for (int x = 0; x < Config::Video::FRAME_WIDTH / 2 && pixel_index < packet_data.size(); x++) {
+            uint8_t byte = packet_data[pixel_index++];
+            uint8_t pixel1 = byte & 0x0F;
+            uint8_t pixel2 = (byte & 0xF0) >> 4;
             
-            uint8_t pixel_byte = pixel_data[pixel_index++];
-            
-            // Extract two 4-bit pixels and convert to RGB
-            VICIIPalette::RGB pixel1, pixel2;
-            VICIIPalette::unpackPixelPair(pixel_byte, pixel1, pixel2);
-            
-            // Calculate RGB buffer positions - fix sign comparison warnings
+            int y = start_line + line;
             size_t pos1 = static_cast<size_t>(y * Config::Video::FRAME_WIDTH + x * 2) * 3;
             size_t pos2 = static_cast<size_t>(y * Config::Video::FRAME_WIDTH + x * 2 + 1) * 3;
             
-            // Store RGB data with proper bounds checking
-            if (pos1 + 2 < rgb_data.size()) {
-                rgb_data[pos1] = pixel1.r;
-                rgb_data[pos1 + 1] = pixel1.g;
-                rgb_data[pos1 + 2] = pixel1.b;
+            // Set RGB values for pixel 1
+            if (pos1 + 2 < rgb_output.size()) {
+                rgb_output[pos1] = vic_palette_[pixel1][0];     // R
+                rgb_output[pos1 + 1] = vic_palette_[pixel1][1]; // G
+                rgb_output[pos1 + 2] = vic_palette_[pixel1][2]; // B
             }
             
-            if (pos2 + 2 < rgb_data.size()) {
-                rgb_data[pos2] = pixel2.r;
-                rgb_data[pos2 + 1] = pixel2.g;
-                rgb_data[pos2 + 2] = pixel2.b;
+            // Set RGB values for pixel 2
+            if (pos2 + 2 < rgb_output.size()) {
+                rgb_output[pos2] = vic_palette_[pixel2][0];     // R
+                rgb_output[pos2 + 1] = vic_palette_[pixel2][1]; // G
+                rgb_output[pos2 + 2] = vic_palette_[pixel2][2]; // B
             }
         }
     }
 }
 
-bool VideoStreamReceiver::hasFrame() {
-    std::lock_guard<std::mutex> lock(frame_mutex);
-    return !frame_queue.empty();
-}
-
-VideoFrame VideoStreamReceiver::getNextFrame() {
-    std::lock_guard<std::mutex> lock(frame_mutex);
-    if (frame_queue.empty()) {
-        return VideoFrame(); // Return empty frame
-    }
-    
-    VideoFrame frame = frame_queue.front();
-    frame_queue.pop();
-    return frame;
-}
-
-size_t VideoStreamReceiver::getQueueSize() {
-    std::lock_guard<std::mutex> lock(frame_mutex);
-    return frame_queue.size();
-}
-
 void VideoStreamReceiver::cleanupOldFrames() {
-    // Remove incomplete frames that are too old (more than 10 frames behind)
-    if (incomplete_frames.empty()) return;
+    auto now = std::chrono::high_resolution_clock::now();
+    auto cutoff = now - std::chrono::milliseconds(200); // Remove frames older than 200ms
     
-    // Fix: Remove unused variable warning by using the cutoff value
-    uint16_t cutoff_age = 10; // Frames to keep
-    
-    auto it = incomplete_frames.begin();
-    while (it != incomplete_frames.end()) {
-        uint16_t frame_age = (last_frame_num - it->first) & 0xFFFF;
-        if (frame_age > cutoff_age && frame_age < 32768) { // Handle wrap-around
-            it = incomplete_frames.erase(it);
+    for (auto it = frames_in_progress_.begin(); it != frames_in_progress_.end();) {
+        if (it->second.first_packet_time < cutoff) {
+            it = frames_in_progress_.erase(it);
+            frames_dropped_++;
         } else {
             ++it;
         }
     }
 }
 
-void VideoStreamReceiver::printStats() {
-    double frame_drop_rate = total_frames > 0 ? (100.0 * dropped_frames / total_frames) : 0.0;
-    std::cout << "\nVideo Stats - Frames: " << total_frames 
-              << ", Dropped: " << dropped_frames 
-              << " (" << frame_drop_rate << "%), Queue: " << getQueueSize()
-              << ", Incomplete: " << incomplete_frames.size() << std::endl;
+bool VideoStreamReceiver::hasFrame() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(frames_mutex_));
+    return !completed_frames_.empty();
+}
+
+VideoFrame VideoStreamReceiver::getNextFrame() {
+    std::lock_guard<std::mutex> lock(frames_mutex_);
+    if (completed_frames_.empty()) {
+        return VideoFrame{}; // Return empty frame
+    }
+    
+    VideoFrame frame = completed_frames_.front();
+    completed_frames_.pop();
+    return frame;
+}
+
+size_t VideoStreamReceiver::getFrameQueueSize() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(frames_mutex_));
+    return completed_frames_.size();
 }
