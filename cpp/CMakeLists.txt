@@ -74,36 +74,35 @@ if(SDL2_LIBRARY_DIRS)
     link_directories(${SDL2_LIBRARY_DIRS})
 endif()
 
-# Source files
-set(SOURCES
-    src/main.cpp
-    src/ultimate64_viewer.cpp
+# Define common source files
+set(COMMON_SOURCES
     src/stream_receiver.cpp
     src/audio_stream_receiver.cpp
     src/video_stream_receiver.cpp
     src/raw_capture.cpp
+    src/av_synchronizer.cpp
 )
 
-# Headers
-set(HEADERS
-    src/config.h
-    src/stream_types.h
-    src/stream_receiver.h
-    src/audio_stream_receiver.h
-    src/video_stream_receiver.h
-    src/capture_interface.h
-    src/raw_capture.h
+# Main viewer application
+add_executable(Ultimate64Viewer 
+    src/main.cpp
+    src/ultimate64_viewer.cpp
+    ${COMMON_SOURCES}
 )
 
-# Add executable with all source files
-add_executable(Ultimate64Viewer ${SOURCES})
+# Capture test application
+add_executable(CaptureTest 
+    src/capture_test.cpp
+    ${COMMON_SOURCES}
+)
 
 # Link libraries
 target_link_libraries(Ultimate64Viewer ${SDL2_LIBRARIES})
+target_link_libraries(CaptureTest ${SDL2_LIBRARIES})
 
 # On macOS, we might need additional frameworks
 if(APPLE)
-    target_link_libraries(Ultimate64Viewer 
+    set(APPLE_FRAMEWORKS
         "-framework Cocoa"
         "-framework IOKit"
         "-framework CoreVideo"
@@ -114,49 +113,43 @@ if(APPLE)
         "-framework CoreHaptics"
         "-framework GameController"
     )
+    
+    target_link_libraries(Ultimate64Viewer ${APPLE_FRAMEWORKS})
+    target_link_libraries(CaptureTest ${APPLE_FRAMEWORKS})
 endif()
 
 # Compiler-specific options
 if(WIN32)
     target_link_libraries(Ultimate64Viewer ws2_32)
+    target_link_libraries(CaptureTest ws2_32)
 endif()
 
 # Set compiler flags
 if(SDL2_CFLAGS_OTHER)
     target_compile_options(Ultimate64Viewer PRIVATE ${SDL2_CFLAGS_OTHER})
+    target_compile_options(CaptureTest PRIVATE ${SDL2_CFLAGS_OTHER})
 endif()
 
 # Add compiler warnings
 if(MSVC)
     target_compile_options(Ultimate64Viewer PRIVATE /W4)
+    target_compile_options(CaptureTest PRIVATE /W4)
 else()
     target_compile_options(Ultimate64Viewer PRIVATE -Wall -Wextra -pedantic)
+    target_compile_options(CaptureTest PRIVATE -Wall -Wextra -pedantic)
 endif()
 
 # For debug builds
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
-# Install target
-install(TARGETS Ultimate64Viewer DESTINATION bin)
+# Install targets
+install(TARGETS Ultimate64Viewer CaptureTest DESTINATION bin)
 
-# Capture test executable
-add_executable(CaptureTest 
-    src/capture_test.cpp
-    src/stream_receiver.cpp
-    src/audio_stream_receiver.cpp
-    src/video_stream_receiver.cpp
-    src/raw_capture.cpp
-)
+# Option to build encoder
+option(BUILD_ENCODER "Build the raw encoder tool" ON)
 
-target_link_libraries(CaptureTest ${SDL2_LIBRARIES})
-
-if(APPLE)
-    target_link_libraries(CaptureTest 
-        "-framework Cocoa"
-        "-framework IOKit"
-        "-framework CoreVideo"
-        "-framework CoreAudio"
-        "-framework AudioToolbox"
-    )
+if(BUILD_ENCODER)
+    message(STATUS "Adding encoder subdirectory")
+    add_subdirectory(encoder)
 endif()

@@ -1,10 +1,14 @@
 #include "raw_encoder.h"
-#include "raw_capture.h" // For reading our raw format
+#include "../src/config.h"
 #include <iostream>
 #include <fstream>
 #include <thread>
 #include <chrono>
 #include <filesystem>
+#include <atomic>
+
+// Global cancellation flag for the encoder
+static std::atomic<bool> should_cancel{false};
 
 // Dummy FFmpeg context
 struct RawEncoder::FFmpegContext {
@@ -136,9 +140,6 @@ bool RawEncoder::encode() {
     
     for (size_t frame = 0; frame < progress.total_frames; frame++) {
         // Simulate frame processing time
-        auto frame_start = std::chrono::high_resolution_clock::now();
-        
-        // Simulate encoding work (sleep based on encoding speed)
         double frame_time_ms = 1000.0 / ctx.encoding_speed;
         std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(frame_time_ms)));
         
@@ -168,7 +169,7 @@ bool RawEncoder::encode() {
             progress_callback_(progress);
         }
         
-        // Check for cancellation (in real implementation)
+        // Check for cancellation
         if (should_cancel.load()) {
             progress.has_error = true;
             progress.error_message = "Encoding cancelled by user";
@@ -263,39 +264,21 @@ EncoderProgress RawEncoder::analyzeFile(const std::string& path) {
     
     analysis.input_size_bytes = std::filesystem::file_size(path);
     
-    // Try to read raw capture file header
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        analysis.has_error = true;
-        analysis.error_message = "Cannot open file";
-        return analysis;
+    // Simple estimation based on file size (no header parsing for now)
+    std::cout << "Estimating file contents based on size..." << std::endl;
+    
+    // Rough estimation: assume ~300KB per frame (video + audio)
+    analysis.total_frames = analysis.input_size_bytes / (300 * 1024);
+    if (analysis.total_frames == 0) {
+        analysis.total_frames = 100; // Minimum assumption
     }
     
-    // Read raw capture header (if it exists)
-    RawCaptureHeader header;
-    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+    analysis.total_audio_packets = analysis.total_frames * 5; // ~5 audio packets per frame
+    analysis.duration_seconds = analysis.total_frames / 50.0; // 50 FPS
     
-    if (file.gcount() == sizeof(header) && 
-        header.magic == RAW_CAPTURE_MAGIC && 
-        header.version == RAW_CAPTURE_VERSION) {
-        
-        // Valid raw capture file
-        analysis.total_frames = header.total_video_frames;
-        analysis.total_audio_packets = header.total_audio_packets;
-        analysis.duration_seconds = header.duration_ms / 1000.0;
-        
-        std::cout << "Valid U64 raw capture file detected" << std::endl;
-    } else {
-        // Estimate based on file size (fallback)
-        std::cout << "Estimating file contents based on size..." << std::endl;
-        
-        // Rough estimation: assume ~300KB per frame (video + audio)
-        analysis.total_frames = analysis.input_size_bytes / (300 * 1024);
-        analysis.total_audio_packets = analysis.total_frames * 5; // ~5 audio packets per frame
-        analysis.duration_seconds = analysis.total_frames / 50.0; // 50 FPS
-    }
+    std::cout << "Estimated " << analysis.total_frames << " frames, " 
+              << analysis.duration_seconds << " seconds" << std::endl;
     
-    file.close();
     return analysis;
 }
 
@@ -303,14 +286,14 @@ std::vector<std::string> RawEncoder::getSupportedFormats() {
     return {"mp4", "avi", "mov"};
 }
 
-bool RawEncoder::processVideoFrame(const VideoFrame& frame) {
+bool RawEncoder::processVideoFrame(const VideoFrame& /* frame */) {
     // Dummy video frame processing
     ffmpeg_ctx_->frames_encoded++;
     ffmpeg_ctx_->output_bytes += 50 * 1024; // Simulate ~50KB per frame
     return true;
 }
 
-bool RawEncoder::processAudioPacket(const AudioPacket& packet) {
+bool RawEncoder::processAudioPacket(const AudioPacket& /* packet */) {
     // Dummy audio packet processing
     ffmpeg_ctx_->audio_packets_encoded++;
     ffmpeg_ctx_->output_bytes += 1024; // Simulate ~1KB per audio packet
@@ -326,6 +309,3 @@ void RawEncoder::cleanup() {
         ffmpeg_ctx_->initialized = false;
     }
 }
-
-// Add missing atomic for cancellation
-std::atomic<bool> should_cancel{false};
