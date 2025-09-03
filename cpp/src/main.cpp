@@ -99,17 +99,35 @@ int main(int argc, char* argv[]) {
         producer->start();
         
         // Main event loop
+        const auto frame_duration = std::chrono::microseconds(20000); // 20ms = 50Hz PAL
+        auto next_frame_time = std::chrono::high_resolution_clock::now();
+        
         while (!g_shutdown_requested.load()) {
+            auto now = std::chrono::high_resolution_clock::now();
+            
             // Process SDL events
             if (!player->processEvents()) {
                 break; // User closed window or pressed ESC
             }
             
-            // Update display
-            player->updateDisplay();
+            // Update display at 50Hz
+            if (now >= next_frame_time) {
+                player->updateDisplay();
+                
+                // Schedule next frame
+                next_frame_time += frame_duration;
+                
+                // If we're running way behind (more than 2 frames), reset
+                if (next_frame_time < now - frame_duration * 2) {
+                    next_frame_time = now;
+                }
+            }
             
-            // Small delay
-            std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60fps
+            // Calculate sleep time
+            auto sleep_time = next_frame_time - now;
+            if (sleep_time > std::chrono::milliseconds(1)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
         
         // Cleanup

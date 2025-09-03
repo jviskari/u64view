@@ -38,6 +38,17 @@ private:
     std::atomic<uint64_t> frames_displayed;
     std::atomic<uint64_t> audio_samples_played;
     
+    // Diagnostics
+    std::chrono::high_resolution_clock::time_point last_frame_time;
+    std::chrono::high_resolution_clock::time_point last_stats_time;
+    std::vector<double> frame_intervals;
+    std::atomic<uint64_t> frames_dropped{0};
+    std::atomic<size_t> current_queue_size{0};
+    uint64_t last_displayed_frame_num{0};
+    std::chrono::high_resolution_clock::time_point start_time;
+    
+    void printDiagnostics();
+    
 public:
     SDLAVPlayer(const std::string& title = "Ultimate64 Viewer");
     ~SDLAVPlayer();

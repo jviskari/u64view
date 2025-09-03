@@ -2,6 +2,7 @@
 #include "config.h"
 #include <iostream>
 #include <algorithm>
+#include <queue>
 
 NetworkAVProducer::NetworkAVProducer() 
     : running(false), next_video_frame_number(0), next_audio_frame_number(0),
@@ -99,40 +100,68 @@ std::chrono::microseconds NetworkAVProducer::getPosition() const {
 void NetworkAVProducer::producerLoop() {
     std::cout << "Starting network producer loop" << std::endl;
     
+    // Frame timing for 50Hz
+    const auto frame_duration = std::chrono::microseconds(20000); // 20ms = 50Hz
+    auto next_frame_time = std::chrono::high_resolution_clock::now();
+    
+    // Keep a small buffer of frames to smooth out network jitter
+    std::queue<VideoFrame> frame_buffer;
+    const size_t BUFFER_SIZE = 2; // Buffer 2 frames (40ms)
+    
     while (running.load()) {
-        bool produced_frame = false;
+        auto now = std::chrono::high_resolution_clock::now();
         
-        // Process video frames
-        if (video_receiver->hasFrame()) {
+        // Fill frame buffer
+        while (frame_buffer.size() < BUFFER_SIZE && video_receiver->hasFrame()) {
             VideoFrame video_frame = video_receiver->getNextFrame();
             if (video_frame.is_complete) {
-                VideoAVFrame av_frame = convertVideoFrame(video_frame);
-                
-                // Send to all consumers
-                {
-                    std::lock_guard<std::mutex> lock(consumers_mutex);
-                    for (auto& consumer : consumers) {
-                        consumer->onVideoFrame(av_frame);
-                    }
-                }
-                
-                video_frames_produced++;
-                produced_frame = true;
-                
-                // Update sync
-                av_sync->updateVideoTimestamp();
-                av_sync->frameDisplayed(av_frame.frame_number);
+                frame_buffer.push(video_frame);
             }
         }
         
-        // Process audio - get samples in chunks suitable for frames
+        // Process video frame at correct timing
+        if (now >= next_frame_time && !frame_buffer.empty()) {
+            VideoFrame video_frame = frame_buffer.front();
+            frame_buffer.pop();
+            
+            // Convert with proper timing
+            VideoAVFrame av_frame = convertVideoFrame(video_frame);
+            
+            // Override timestamps with correct presentation time
+            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                next_frame_time - start_time);
+            av_frame.timestamp_us = elapsed.count();
+            av_frame.presentation_time_us = av_frame.timestamp_us;
+            
+            // Send to all consumers
+            {
+                std::lock_guard<std::mutex> lock(consumers_mutex);
+                for (auto& consumer : consumers) {
+                    consumer->onVideoFrame(av_frame);
+                }
+            }
+            
+            video_frames_produced++;
+            av_sync->updateVideoTimestamp();
+            av_sync->frameDisplayed(av_frame.frame_number);
+            
+            // Schedule next frame
+            next_frame_time += frame_duration;
+            
+            // If we're running behind, catch up
+            if (next_frame_time < now - frame_duration) {
+                next_frame_time = now;
+            }
+        }
+        
+        // Process audio continuously
         if (audio_receiver->hasAudioData()) {
             const size_t samples_per_frame = 1024; // About 21ms at 48kHz
             auto audio_samples = audio_receiver->getNextSamples(samples_per_frame);
             
             if (!audio_samples.empty()) {
                 auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::high_resolution_clock::now() - start_time).count();
+                    now - start_time).count();
                 
                 AudioAVFrame av_frame = convertAudioFrame(audio_samples, timestamp_us);
                 
@@ -145,22 +174,19 @@ void NetworkAVProducer::producerLoop() {
                 }
                 
                 audio_frames_produced++;
-                produced_frame = true;
-                
-                // Update sync
                 av_sync->updateAudioTimestamp();
             }
         }
         
         // Print stats periodically
-        auto now = std::chrono::high_resolution_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_stats_time).count() >= 5) {
             printStats();
             last_stats_time = now;
         }
         
-        // Small delay if no frames were produced
-        if (!produced_frame) {
+        // Sleep until next frame time or 1ms, whichever is shorter
+        auto sleep_time = next_frame_time - now;
+        if (sleep_time > std::chrono::milliseconds(1)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }

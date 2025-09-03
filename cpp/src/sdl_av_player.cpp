@@ -2,6 +2,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -45,11 +46,21 @@ bool SDLAVPlayer::initialize(int window_width, int window_height) {
         return false;
     }
     
-    // Create renderer
+    // Create renderer with vsync
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) {
         std::cerr << "Renderer could not be created! SDL_Error: " << SDL_GetError() << std::endl;
         return false;
+    }
+    
+    // Verify vsync is enabled
+    SDL_RendererInfo info;
+    SDL_GetRendererInfo(renderer, &info);
+    std::cout << "Renderer: " << info.name << std::endl;
+    if (info.flags & SDL_RENDERER_PRESENTVSYNC) {
+        std::cout << "VSync: Enabled" << std::endl;
+    } else {
+        std::cout << "VSync: NOT enabled - expect tearing!" << std::endl;
     }
     
     // Setup audio
@@ -60,6 +71,10 @@ bool SDLAVPlayer::initialize(int window_width, int window_height) {
     
     initialized = true;
     playing = true;
+    
+    // Initialize timing
+    last_frame_time = std::chrono::high_resolution_clock::now();
+    last_stats_time = last_frame_time;
     
     std::cout << "SDL AV Player initialized successfully" << std::endl;
     std::cout << "Window: " << window_width << "x" << window_height << std::endl;
@@ -105,6 +120,9 @@ bool SDLAVPlayer::processEvents() {
             } else if (e.key.keysym.sym == SDLK_SPACE) {
                 // Toggle pause (for future use)
                 std::cout << "Space pressed" << std::endl;
+            } else if (e.key.keysym.sym == SDLK_d) {
+                // Print diagnostics
+                printDiagnostics();
             }
         }
     }
@@ -114,6 +132,8 @@ bool SDLAVPlayer::processEvents() {
 void SDLAVPlayer::updateDisplay() {
     if (!initialized.load()) return;
     
+    auto now = std::chrono::high_resolution_clock::now();
+    
     // Get the next video frame if available
     VideoAVFrame frame_to_display;
     bool has_frame = false;
@@ -121,20 +141,70 @@ void SDLAVPlayer::updateDisplay() {
     {
         std::lock_guard<std::mutex> lock(video_mutex);
         if (!video_queue.empty()) {
-            frame_to_display = video_queue.front();
-            video_queue.pop();
-            has_frame = true;
+            // Look at the presentation time of the front frame
+            const auto& front_frame = video_queue.front();
+            
+            // Calculate when this frame should be displayed
+            auto frame_time = start_time + std::chrono::microseconds(front_frame.presentation_time_us);
+            
+            // Only display if it's time (with 5ms tolerance)
+            if (now >= frame_time - std::chrono::milliseconds(5)) {
+                frame_to_display = video_queue.front();
+                video_queue.pop();
+                has_frame = true;
+                
+                // Check if we're late
+                if (now > frame_time + std::chrono::milliseconds(10)) {
+                    // We're late, drop any additional old frames
+                    while (!video_queue.empty()) {
+                        const auto& next_frame = video_queue.front();
+                        auto next_time = start_time + std::chrono::microseconds(next_frame.presentation_time_us);
+                        if (now >= next_time) {
+                            video_queue.pop();
+                            frames_dropped++;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            current_queue_size = video_queue.size();
         }
     }
     
     if (has_frame) {
+        // Check for frame drops (non-sequential frame numbers)
+        if (last_displayed_frame_num > 0 && 
+            frame_to_display.frame_number != last_displayed_frame_num + 1) {
+            frames_dropped += frame_to_display.frame_number - last_displayed_frame_num - 1;
+        }
+        last_displayed_frame_num = frame_to_display.frame_number;
+        
         displayVideoFrame(frame_to_display);
         frames_displayed++;
+        
+        // Calculate inter-frame timing
+        auto frame_delta = now - last_frame_time;
+        double ms = std::chrono::duration<double, std::milli>(frame_delta).count();
+        frame_intervals.push_back(ms);
+        if (frame_intervals.size() > 100) {
+            frame_intervals.erase(frame_intervals.begin());
+        }
+        
+        last_frame_time = now;
     } else {
-        // No new frame - just clear to black
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderPresent(renderer);
+        // No frame ready yet - this is normal if we're calling at exactly 50Hz
+        // Just present the last frame again to maintain consistent timing
+        if (renderer && video_texture) {
+            SDL_RenderPresent(renderer);
+        }
+    }
+    
+    // Print stats periodically
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_stats_time).count() >= 5) {
+        printDiagnostics();
+        last_stats_time = now;
     }
 }
 
@@ -166,7 +236,16 @@ void SDLAVPlayer::displayVideoFrame(const VideoAVFrame& frame) {
         // Copy RGB data
         const size_t expected_size = frame.width * frame.height * 3;
         if (frame.rgb_data.size() >= expected_size) {
-            std::memcpy(pixels, frame.rgb_data.data(), expected_size);
+            // Copy line by line to handle pitch differences
+            const uint8_t* src = frame.rgb_data.data();
+            uint8_t* dst = static_cast<uint8_t*>(pixels);
+            size_t row_size = frame.width * 3;
+            
+            for (int y = 0; y < frame.height; y++) {
+                std::memcpy(dst, src, row_size);
+                src += row_size;
+                dst += pitch;
+            }
         } else {
             std::cerr << "Warning: Frame data size mismatch. Expected " << expected_size 
                       << ", got " << frame.rgb_data.size() << std::endl;
@@ -186,9 +265,11 @@ void SDLAVPlayer::onVideoFrame(const VideoAVFrame& frame) {
     
     std::lock_guard<std::mutex> lock(video_mutex);
     
-    // Keep queue size reasonable
-    while (video_queue.size() >= 5) {
+    // Keep queue size reasonable but not too small
+    const size_t MAX_QUEUE_SIZE = 3; // Reduced from 5
+    while (video_queue.size() >= MAX_QUEUE_SIZE) {
         video_queue.pop(); // Drop oldest frame
+        frames_dropped++;
     }
     
     video_queue.push(frame);
@@ -245,6 +326,42 @@ void SDLAVPlayer::fillAudioBuffer(int16_t* buffer, int sample_count) {
     audio_samples_played += samples_filled;
     
     // Remaining samples are already zeroed from memset
+}
+
+void SDLAVPlayer::printDiagnostics() {
+    std::cout << "\n=== SDL Player Diagnostics ===" << std::endl;
+    std::cout << "Frames displayed: " << frames_displayed.load() << std::endl;
+    std::cout << "Frames dropped: " << frames_dropped.load() << std::endl;
+    std::cout << "Current queue size: " << current_queue_size.load() << std::endl;
+    std::cout << "Audio samples played: " << audio_samples_played.load() << std::endl;
+    
+    // Analyze frame intervals
+    if (!frame_intervals.empty()) {
+        double avg = 0, min_val = 1000, max_val = 0;
+        for (double interval : frame_intervals) {
+            avg += interval;
+            min_val = std::min(min_val, interval);
+            max_val = std::max(max_val, interval);
+        }
+        avg /= frame_intervals.size();
+        
+        std::cout << "\nFrame timing:" << std::endl;
+        std::cout << "  Average: " << std::fixed << std::setprecision(2) << avg << " ms" << std::endl;
+        std::cout << "  Min: " << min_val << " ms" << std::endl;
+        std::cout << "  Max: " << max_val << " ms" << std::endl;
+        std::cout << "  Jitter: " << (max_val - min_val) << " ms" << std::endl;
+        
+        // Show recent intervals
+        std::cout << "\nLast 10 frame intervals:" << std::endl;
+        size_t start = frame_intervals.size() > 10 ? frame_intervals.size() - 10 : 0;
+        for (size_t i = start; i < frame_intervals.size(); i++) {
+            std::cout << "  " << std::fixed << std::setprecision(1) << frame_intervals[i] << " ms";
+            if (std::abs(frame_intervals[i] - 20.0) > 5.0) {
+                std::cout << " ***";
+            }
+            std::cout << std::endl;
+        }
+    }
 }
 
 void SDLAVPlayer::cleanup() {

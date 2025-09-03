@@ -94,6 +94,7 @@ set(NETWORK_SOURCES
     src/audio_stream_receiver.cpp
     src/stream_receiver.cpp
     src/av_synchronizer.cpp
+    src/frame_timing_diagnostic.cpp
 )
 
 # Main Ultimate64Viewer application
