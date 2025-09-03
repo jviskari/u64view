@@ -63,8 +63,9 @@ std::chrono::high_resolution_clock::time_point AVSynchronizer::getNextFrameTime(
         return std::chrono::high_resolution_clock::now();
     }
     
-    // Calculate ideal next frame time based on frame rate (20ms for 50Hz)
-    auto frame_interval = std::chrono::microseconds(20000);
+    // Calculate ideal next frame time based on frame rate
+    // Fix: Cast to long long to avoid double conversion error
+    auto frame_interval = std::chrono::microseconds(static_cast<long long>(1000000.0 / Config::Video::FRAME_RATE));
     
     // Apply gentle sync correction based on A/V drift (but limit it)
     double drift_ms = current_drift_ms.load();

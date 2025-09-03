@@ -24,7 +24,11 @@ private:
     std::atomic<uint16_t> last_sequence;
     std::atomic<size_t> dropped_packets;
     std::atomic<size_t> total_packets;
-    std::atomic<std::chrono::high_resolution_clock::time_point> last_receive_time;
+    
+    // Thread-safe time tracking
+    mutable std::mutex time_mutex;
+    std::chrono::high_resolution_clock::time_point last_receive_time;
+    
     std::chrono::high_resolution_clock::time_point stats_time;
     
 public:
@@ -50,6 +54,7 @@ protected:
     
 private:
     void printStats();
+    void setLastReceiveTime(const std::chrono::high_resolution_clock::time_point& time);
 };
 
 #endif // AUDIO_STREAM_RECEIVER_H

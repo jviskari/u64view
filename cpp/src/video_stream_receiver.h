@@ -45,7 +45,11 @@ private:
     size_t dropped_frames;
     size_t total_frames;
     size_t total_packets;
+    
+    // Thread-safe time tracking
+    mutable std::mutex time_mutex;
     std::chrono::high_resolution_clock::time_point last_receive_time;
+    
     std::chrono::high_resolution_clock::time_point stats_time;
     
 public:
@@ -62,7 +66,7 @@ public:
     size_t getQueueSize();
     
     // Statistics
-    std::chrono::high_resolution_clock::time_point getLastReceiveTime() const { return last_receive_time; }
+    std::chrono::high_resolution_clock::time_point getLastReceiveTime() const;
     size_t getDroppedFrameCount() const { return dropped_frames; }
     size_t getTotalFrameCount() const { return total_frames; }
     size_t getTotalPacketCount() const { return total_packets; }
@@ -75,6 +79,7 @@ private:
     void convertPixelsToRGB(const std::vector<uint8_t>& pixel_data, std::vector<uint8_t>& rgb_data, int start_y);
     void cleanupOldFrames();
     void printStats();
+    void setLastReceiveTime(const std::chrono::high_resolution_clock::time_point& time);
 };
 
 #endif // VIDEO_STREAM_RECEIVER_H

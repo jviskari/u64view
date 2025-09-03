@@ -6,7 +6,8 @@
 AudioStreamReceiver::AudioStreamReceiver()
     : StreamReceiver(Config::Network::MULTICAST_GROUP, Config::Network::AUDIO_PORT),
       last_sequence(0), dropped_packets(0), total_packets(0) {
-    last_receive_time.store(std::chrono::high_resolution_clock::time_point{});
+    // Initialize with epoch time
+    last_receive_time = std::chrono::high_resolution_clock::time_point{};
 }
 
 AudioStreamReceiver::~AudioStreamReceiver() {
@@ -44,7 +45,9 @@ void AudioStreamReceiver::processPacket(const char* data, size_t size) {
     if (size < 2) return; // Need at least sequence number
     
     total_packets++;
-    last_receive_time.store(std::chrono::high_resolution_clock::now());
+    
+    // Update last receive time in thread-safe manner
+    setLastReceiveTime(std::chrono::high_resolution_clock::now());
     
     // Parse sequence number (little-endian)
     uint16_t sequence;
@@ -146,7 +149,13 @@ size_t AudioStreamReceiver::getQueueSize() const {
 }
 
 std::chrono::high_resolution_clock::time_point AudioStreamReceiver::getLastReceiveTime() const {
-    return last_receive_time.load();
+    std::lock_guard<std::mutex> lock(time_mutex);
+    return last_receive_time;
+}
+
+void AudioStreamReceiver::setLastReceiveTime(const std::chrono::high_resolution_clock::time_point& time) {
+    std::lock_guard<std::mutex> lock(time_mutex);
+    last_receive_time = time;
 }
 
 void AudioStreamReceiver::printStats() {

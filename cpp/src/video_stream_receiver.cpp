@@ -43,11 +43,21 @@ void VideoStreamReceiver::stop() {
     incomplete_frames.clear();
 }
 
+void VideoStreamReceiver::setLastReceiveTime(const std::chrono::high_resolution_clock::time_point& time) {
+    std::lock_guard<std::mutex> lock(time_mutex);
+    last_receive_time = time;
+}
+
+std::chrono::high_resolution_clock::time_point VideoStreamReceiver::getLastReceiveTime() const {
+    std::lock_guard<std::mutex> lock(time_mutex);
+    return last_receive_time;
+}
+
 void VideoStreamReceiver::processPacket(const char* data, size_t size) {
     if (size < sizeof(VideoPacketHeader)) return;
     
     total_packets++;
-    last_receive_time = std::chrono::high_resolution_clock::now();
+    setLastReceiveTime(std::chrono::high_resolution_clock::now());
     
     // Parse header
     VideoPacketHeader header;
