@@ -76,37 +76,28 @@ void FileAVProducer::playbackLoop() {
     const auto frame_duration = std::chrono::microseconds(20000); // 20ms = 50Hz
     auto next_video_frame_time = playback_start_time;
     uint64_t video_frames_sent = 0;
+    uint64_t audio_frames_sent = 0;
     
-    // Read-ahead buffer for frames
+    // Small buffer for read-ahead
     std::queue<std::unique_ptr<AVFrame>> frame_buffer;
-    const size_t BUFFER_SIZE = 10; // Buffer up to 10 frames
+    const size_t BUFFER_SIZE = 5;
     
     while (running.load()) {
-        // Check if we're at end of file before trying to read
-        if (file.eof() || file.peek() == EOF) {
-            // If buffer is empty, we're done
-            if (frame_buffer.empty()) {
-                std::cout << "Reached end of file: " << filename << std::endl;
-                break;
-            }
-        }
-        
         if (paused.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
         
-        // Fill buffer with frames
+        // Fill buffer if needed
         while (frame_buffer.size() < BUFFER_SIZE && !file.eof() && file.peek() != EOF) {
             auto pos_before = file.tellg();
             auto frame = AVFrameSerializer::deserialize(file);
             
             if (!frame) {
                 if (file.eof()) {
-                    break; // Normal end of file
+                    break;
                 } else {
-                    std::cerr << "Failed to deserialize frame at position " << pos_before 
-                              << " in file: " << filename << std::endl;
+                    std::cerr << "Failed to deserialize frame at position " << pos_before << std::endl;
                     notifyError("Failed to deserialize frame");
                     break;
                 }
@@ -116,23 +107,29 @@ void FileAVProducer::playbackLoop() {
             frame_buffer.push(std::move(frame));
         }
         
-        // Process buffered frames at correct timing
+        // Check if we're done
+        if (frame_buffer.empty() && (file.eof() || file.peek() == EOF)) {
+            std::cout << "Reached end of file: " << filename << std::endl;
+            break;
+        }
+        
         auto now = std::chrono::high_resolution_clock::now();
         
+        // Process frames
         while (!frame_buffer.empty()) {
             auto& frame = frame_buffer.front();
             
-            // Handle video frames with proper timing
             if (frame->frame_type == AVFrameType::VIDEO) {
-                // Wait until it's time to send this frame
+                // Check if it's time for this video frame
                 if (now < next_video_frame_time) {
-                    break; // Not time yet, keep frame in buffer
+                    break; // Not time yet
                 }
                 
-                // Update presentation timestamp to match playback timing
+                // Update timestamps
                 auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                     next_video_frame_time - playback_start_time);
                 frame->presentation_time_us = elapsed.count();
+                frame->timestamp_us = frame->presentation_time_us;
                 
                 // Send to consumers
                 {
@@ -146,33 +143,42 @@ void FileAVProducer::playbackLoop() {
                 video_frames_sent++;
                 next_video_frame_time += frame_duration;
                 
-                // If we're running behind, catch up
+                // Reset if too far behind
                 if (next_video_frame_time < now - frame_duration * 2) {
                     next_video_frame_time = now;
                 }
-            } 
-            // Handle audio frames immediately (they have their own timing via the audio callback)
-            else if (frame->frame_type == AVFrameType::AUDIO) {
-                std::lock_guard<std::mutex> lock(consumers_mutex);
-                auto audio_frame = static_cast<AudioAVFrame*>(frame.get());
-                for (auto& consumer : consumers) {
-                    consumer->onAudioFrame(*audio_frame);
+                
+                frame_buffer.pop();
+            } else if (frame->frame_type == AVFrameType::AUDIO) {
+                // Send audio immediately
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    now - playback_start_time);
+                frame->timestamp_us = elapsed.count();
+                frame->presentation_time_us = frame->timestamp_us;
+                
+                {
+                    std::lock_guard<std::mutex> lock(consumers_mutex);
+                    auto audio_frame = static_cast<AudioAVFrame*>(frame.get());
+                    for (auto& consumer : consumers) {
+                        consumer->onAudioFrame(*audio_frame);
+                    }
                 }
+                
+                audio_frames_sent++;
+                frame_buffer.pop();
             }
-            
-            frame_buffer.pop();
         }
         
-        // Calculate sleep time until next video frame
+        // Sleep until next video frame time
         now = std::chrono::high_resolution_clock::now();
-        auto sleep_time = next_video_frame_time - now;
-        if (sleep_time > std::chrono::milliseconds(1)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (next_video_frame_time > now) {
+            std::this_thread::sleep_until(next_video_frame_time - std::chrono::milliseconds(1));
         }
     }
     
     std::cout << "Playback loop finished. Read " << frames_read.load() 
-              << " frames, sent " << video_frames_sent << " video frames" << std::endl;
+              << " frames, sent " << video_frames_sent << " video, " 
+              << audio_frames_sent << " audio" << std::endl;
     notifyStreamEnd();
 }
 

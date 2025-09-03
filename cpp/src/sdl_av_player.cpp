@@ -30,9 +30,15 @@ bool SDLAVPlayer::initialize(int window_width, int window_height) {
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
     
-    // Initialize SDL
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
+    // Initialize SDL with audio explicitly
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) {
         std::cerr << "SDL could not initialize! SDL_Error: " << SDL_GetError() << std::endl;
+        return false;
+    }
+    
+    // Check audio subsystem
+    if (!SDL_WasInit(SDL_INIT_AUDIO)) {
+        std::cerr << "SDL Audio subsystem not initialized!" << std::endl;
         return false;
     }
     
@@ -132,7 +138,14 @@ bool SDLAVPlayer::processEvents() {
 void SDLAVPlayer::updateDisplay() {
     if (!initialized.load()) return;
     
+    static auto last_present_time = std::chrono::high_resolution_clock::now();
     auto now = std::chrono::high_resolution_clock::now();
+    
+    // Ensure minimum time between presents to avoid overwhelming the GPU
+    const auto min_present_interval = std::chrono::microseconds(19000); // Slightly less than 20ms
+    if (now - last_present_time < min_present_interval) {
+        return;
+    }
     
     // Get the next video frame if available
     VideoAVFrame frame_to_display;
@@ -141,34 +154,9 @@ void SDLAVPlayer::updateDisplay() {
     {
         std::lock_guard<std::mutex> lock(video_mutex);
         if (!video_queue.empty()) {
-            // Look at the presentation time of the front frame
-            const auto& front_frame = video_queue.front();
-            
-            // Calculate when this frame should be displayed
-            auto frame_time = start_time + std::chrono::microseconds(front_frame.presentation_time_us);
-            
-            // Only display if it's time (with 5ms tolerance)
-            if (now >= frame_time - std::chrono::milliseconds(5)) {
-                frame_to_display = video_queue.front();
-                video_queue.pop();
-                has_frame = true;
-                
-                // Check if we're late
-                if (now > frame_time + std::chrono::milliseconds(10)) {
-                    // We're late, drop any additional old frames
-                    while (!video_queue.empty()) {
-                        const auto& next_frame = video_queue.front();
-                        auto next_time = start_time + std::chrono::microseconds(next_frame.presentation_time_us);
-                        if (now >= next_time) {
-                            video_queue.pop();
-                            frames_dropped++;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            
+            frame_to_display = video_queue.front();
+            video_queue.pop();
+            has_frame = true;
             current_queue_size = video_queue.size();
         }
     }
@@ -193,11 +181,12 @@ void SDLAVPlayer::updateDisplay() {
         }
         
         last_frame_time = now;
+        last_present_time = now;
     } else {
-        // No frame ready yet - this is normal if we're calling at exactly 50Hz
-        // Just present the last frame again to maintain consistent timing
-        if (renderer && video_texture) {
+        // No new frame but still present to maintain vsync
+        if (renderer) {
             SDL_RenderPresent(renderer);
+            last_present_time = now;
         }
     }
     
@@ -265,8 +254,8 @@ void SDLAVPlayer::onVideoFrame(const VideoAVFrame& frame) {
     
     std::lock_guard<std::mutex> lock(video_mutex);
     
-    // Keep queue size reasonable but not too small
-    const size_t MAX_QUEUE_SIZE = 3; // Reduced from 5
+    // Increase queue size for better buffering
+    const size_t MAX_QUEUE_SIZE = 5; // Increased from 3
     while (video_queue.size() >= MAX_QUEUE_SIZE) {
         video_queue.pop(); // Drop oldest frame
         frames_dropped++;
@@ -280,15 +269,29 @@ void SDLAVPlayer::onAudioFrame(const AudioAVFrame& frame) {
     
     std::lock_guard<std::mutex> lock(audio_mutex);
     
+    // Debug: Print audio frame info occasionally
+    static int audio_frame_count = 0;
+    if (++audio_frame_count % 100 == 0) {
+        std::cout << "Audio frame " << frame.frame_number 
+                  << ": " << frame.samples.size() << " samples, "
+                  << "queue size: " << audio_queue.size() << std::endl;
+    }
+    
     // Add samples to audio queue
     for (const auto& sample : frame.samples) {
         audio_queue.push(sample);
     }
     
-    // Keep queue size reasonable (about 1 second of audio)
-    const size_t max_samples = 48000 * 2; // 1 second stereo at 48kHz
+    // Reduce max queue size to prevent excessive buffering
+    const size_t max_samples = 48000; // 0.5 seconds instead of 1 second
+    size_t dropped = 0;
     while (audio_queue.size() > max_samples) {
         audio_queue.pop();
+        dropped++;
+    }
+    
+    if (dropped > 0) {
+        std::cout << "WARNING: Dropped " << dropped << " audio samples, queue was full" << std::endl;
     }
 }
 
@@ -302,9 +305,27 @@ void SDLAVPlayer::onStreamError(const std::string& error) {
 }
 
 void SDLAVPlayer::audioCallback(void* userdata, Uint8* stream, int len) {
+    static bool first_call = true;
+    if (first_call) {
+        std::cout << "Audio callback first call! Len: " << len << " bytes" << std::endl;
+        first_call = false;
+    }
+    
     SDLAVPlayer* player = static_cast<SDLAVPlayer*>(userdata);
+    if (!player) {
+        std::cerr << "ERROR: Audio callback userdata is null!" << std::endl;
+        return;
+    }
+    
     int16_t* buffer = reinterpret_cast<int16_t*>(stream);
     int sample_count = len / sizeof(int16_t);
+    
+    // Debug callback
+    static int callback_count = 0;
+    if (++callback_count % 50 == 0) {  // More frequent logging
+        std::cout << "Audio callback #" << callback_count 
+                  << ": requesting " << sample_count << " samples" << std::endl;
+    }
     
     // Clear buffer first
     std::memset(stream, 0, len);
@@ -325,6 +346,15 @@ void SDLAVPlayer::fillAudioBuffer(int16_t* buffer, int sample_count) {
     
     audio_samples_played += samples_filled;
     
+    // Debug: Print if we're running out of samples
+    if (samples_filled < sample_count) {
+        static int underrun_count = 0;
+        if (++underrun_count % 10 == 0) {
+            std::cout << "Audio underrun: only filled " << samples_filled 
+                      << " of " << sample_count << " samples" << std::endl;
+        }
+    }
+    
     // Remaining samples are already zeroed from memset
 }
 
@@ -334,6 +364,25 @@ void SDLAVPlayer::printDiagnostics() {
     std::cout << "Frames dropped: " << frames_dropped.load() << std::endl;
     std::cout << "Current queue size: " << current_queue_size.load() << std::endl;
     std::cout << "Audio samples played: " << audio_samples_played.load() << std::endl;
+    
+    // Add audio queue status
+    {
+        std::lock_guard<std::mutex> lock(audio_mutex);
+        std::cout << "Audio queue size: " << audio_queue.size() << " samples" << std::endl;
+    }
+    
+    // Check audio device status
+    if (audio_device != 0) {
+        SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audio_device);
+        std::cout << "Audio device status: ";
+        switch (status) {
+            case SDL_AUDIO_STOPPED: std::cout << "STOPPED"; break;
+            case SDL_AUDIO_PLAYING: std::cout << "PLAYING"; break;
+            case SDL_AUDIO_PAUSED: std::cout << "PAUSED"; break;
+            default: std::cout << "UNKNOWN"; break;
+        }
+        std::cout << std::endl;
+    }
     
     // Analyze frame intervals
     if (!frame_intervals.empty()) {

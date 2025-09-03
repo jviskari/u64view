@@ -8,7 +8,7 @@
 #include <atomic>
 #include <vector>
 #include <algorithm>
-#include <queue>  // Add this include
+#include <queue>
 
 class FileAVProducer : public AVStreamProducer {
 private:
@@ -24,10 +24,10 @@ private:
     std::atomic<uint64_t> frames_read;
     
     // File position tracking
-    std::streampos data_start_pos;  // Position after header
+    std::streampos data_start_pos;
     
     // Playback timing
-    std::chrono::high_resolution_clock::time_point playback_start_time;  // ADD THIS LINE
+    std::chrono::high_resolution_clock::time_point playback_start_time;
     
 public:
     FileAVProducer(const std::string& filename);
@@ -41,7 +41,7 @@ public:
     
     // Stream info
     bool isLive() const override { return false; }
-    std::chrono::microseconds getDuration() const override { return std::chrono::microseconds::zero(); } // Unknown for now
+    std::chrono::microseconds getDuration() const override { return std::chrono::microseconds::zero(); }
     std::chrono::microseconds getPosition() const override;
     
     // Playback controls
@@ -52,7 +52,7 @@ public:
     
 private:
     void playbackLoop();
-    bool skipHeader(); // Skip the minimal header if present
+    bool skipHeader();
     void notifyError(const std::string& error);
     void notifyStreamEnd();
 };

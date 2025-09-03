@@ -171,18 +171,54 @@ int main(int argc, char* argv[]) {
         // Start playback
         producer->start();
         
-        // Main event loop
+        // Give the system time to stabilize before starting the display loop
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        // Main event loop for file playback
+        const auto frame_duration = std::chrono::microseconds(20000); // 20ms = 50Hz PAL
+        auto next_frame_time = std::chrono::high_resolution_clock::now();
+        auto last_event_check = next_frame_time;
+        
         while (!g_shutdown_requested.load()) {
-            // Process SDL events
-            if (!player->processEvents()) {
-                break; // User closed window or pressed ESC
+            auto now = std::chrono::high_resolution_clock::now();
+            
+            // Process SDL events less frequently to avoid timing disruption
+            if (now - last_event_check >= std::chrono::milliseconds(10)) {
+                if (!player->processEvents()) {
+                    break; // User closed window or pressed ESC
+                }
+                last_event_check = now;
             }
             
-            // Update display
-            player->updateDisplay();
+            // Update display at exactly 50Hz
+            if (now >= next_frame_time) {
+                player->updateDisplay();
+                
+                // Schedule next frame with no drift
+                next_frame_time += frame_duration;
+                
+                // Only reset if we're way behind (more than 2 frames)
+                if (next_frame_time < now - frame_duration * 2) {
+                    auto behind = std::chrono::duration_cast<std::chrono::milliseconds>(now - next_frame_time);
+                    std::cout << "WARNING: Running " << behind.count() << "ms behind, resetting timing" << std::endl;
+                    next_frame_time = now;
+                }
+            }
             
-            // Small delay
-            std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60fps
+            // High precision sleep
+            now = std::chrono::high_resolution_clock::now();
+            if (next_frame_time > now) {
+                // Use busy-wait for the last millisecond for precision
+                auto sleep_time = next_frame_time - now;
+                if (sleep_time > std::chrono::milliseconds(1)) {
+                    std::this_thread::sleep_until(next_frame_time - std::chrono::milliseconds(1));
+                }
+                
+                // Busy wait for precise timing
+                while (std::chrono::high_resolution_clock::now() < next_frame_time) {
+                    // Tight loop for precision
+                }
+            }
         }
         
         // Cleanup
