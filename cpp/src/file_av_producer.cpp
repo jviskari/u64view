@@ -38,6 +38,7 @@ void FileAVProducer::start() {
     
     running = true;
     frames_read = 0;
+    playback_start_time = std::chrono::high_resolution_clock::now();
     playback_thread = std::thread(&FileAVProducer::playbackLoop, this);
     std::cout << "Started file playback: " << filename << std::endl;
 }
@@ -71,11 +72,23 @@ void FileAVProducer::removeConsumer(std::shared_ptr<AVStreamConsumer> consumer) 
 void FileAVProducer::playbackLoop() {
     std::cout << "Starting playback loop for: " << filename << std::endl;
     
+    // Frame timing for 50Hz video
+    const auto frame_duration = std::chrono::microseconds(20000); // 20ms = 50Hz
+    auto next_video_frame_time = playback_start_time;
+    uint64_t video_frames_sent = 0;
+    
+    // Read-ahead buffer for frames
+    std::queue<std::unique_ptr<AVFrame>> frame_buffer;
+    const size_t BUFFER_SIZE = 10; // Buffer up to 10 frames
+    
     while (running.load()) {
         // Check if we're at end of file before trying to read
         if (file.eof() || file.peek() == EOF) {
-            std::cout << "Reached end of file: " << filename << std::endl;
-            break;
+            // If buffer is empty, we're done
+            if (frame_buffer.empty()) {
+                std::cout << "Reached end of file: " << filename << std::endl;
+                break;
+            }
         }
         
         if (paused.load()) {
@@ -83,47 +96,83 @@ void FileAVProducer::playbackLoop() {
             continue;
         }
         
-        // Save current position for error reporting
-        auto pos_before = file.tellg();
-        
-        // Deserialize the next AVFrame
-        auto frame = AVFrameSerializer::deserialize(file);
-        if (!frame) {
-            // Check if we hit EOF naturally
-            if (file.eof()) {
-                std::cout << "Reached end of file: " << filename << std::endl;
-                break;
-            } else {
-                // This is a real error
-                std::cerr << "Failed to deserialize frame at position " << pos_before 
-                          << " in file: " << filename << std::endl;
-                notifyError("Failed to deserialize frame");
-                break;
+        // Fill buffer with frames
+        while (frame_buffer.size() < BUFFER_SIZE && !file.eof() && file.peek() != EOF) {
+            auto pos_before = file.tellg();
+            auto frame = AVFrameSerializer::deserialize(file);
+            
+            if (!frame) {
+                if (file.eof()) {
+                    break; // Normal end of file
+                } else {
+                    std::cerr << "Failed to deserialize frame at position " << pos_before 
+                              << " in file: " << filename << std::endl;
+                    notifyError("Failed to deserialize frame");
+                    break;
+                }
             }
+            
+            frames_read++;
+            frame_buffer.push(std::move(frame));
         }
         
-        frames_read++;
+        // Process buffered frames at correct timing
+        auto now = std::chrono::high_resolution_clock::now();
         
-        // Distribute to consumers based on type
-        std::lock_guard<std::mutex> lock(consumers_mutex);
-        if (frame->frame_type == AVFrameType::VIDEO) {
-            auto video_frame = static_cast<VideoAVFrame*>(frame.get());
-            for (auto& consumer : consumers) {
-                consumer->onVideoFrame(*video_frame);
+        while (!frame_buffer.empty()) {
+            auto& frame = frame_buffer.front();
+            
+            // Handle video frames with proper timing
+            if (frame->frame_type == AVFrameType::VIDEO) {
+                // Wait until it's time to send this frame
+                if (now < next_video_frame_time) {
+                    break; // Not time yet, keep frame in buffer
+                }
+                
+                // Update presentation timestamp to match playback timing
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    next_video_frame_time - playback_start_time);
+                frame->presentation_time_us = elapsed.count();
+                
+                // Send to consumers
+                {
+                    std::lock_guard<std::mutex> lock(consumers_mutex);
+                    auto video_frame = static_cast<VideoAVFrame*>(frame.get());
+                    for (auto& consumer : consumers) {
+                        consumer->onVideoFrame(*video_frame);
+                    }
+                }
+                
+                video_frames_sent++;
+                next_video_frame_time += frame_duration;
+                
+                // If we're running behind, catch up
+                if (next_video_frame_time < now - frame_duration * 2) {
+                    next_video_frame_time = now;
+                }
+            } 
+            // Handle audio frames immediately (they have their own timing via the audio callback)
+            else if (frame->frame_type == AVFrameType::AUDIO) {
+                std::lock_guard<std::mutex> lock(consumers_mutex);
+                auto audio_frame = static_cast<AudioAVFrame*>(frame.get());
+                for (auto& consumer : consumers) {
+                    consumer->onAudioFrame(*audio_frame);
+                }
             }
-        } else if (frame->frame_type == AVFrameType::AUDIO) {
-            auto audio_frame = static_cast<AudioAVFrame*>(frame.get());
-            for (auto& consumer : consumers) {
-                consumer->onAudioFrame(*audio_frame);
-            }
+            
+            frame_buffer.pop();
         }
         
-        // Simple timing - could be improved with actual timestamp-based timing
-        // For now, just a small delay to prevent overwhelming consumers
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // Calculate sleep time until next video frame
+        now = std::chrono::high_resolution_clock::now();
+        auto sleep_time = next_video_frame_time - now;
+        if (sleep_time > std::chrono::milliseconds(1)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
     
-    std::cout << "Playback loop finished. Read " << frames_read.load() << " frames" << std::endl;
+    std::cout << "Playback loop finished. Read " << frames_read.load() 
+              << " frames, sent " << video_frames_sent << " video frames" << std::endl;
     notifyStreamEnd();
 }
 
@@ -159,4 +208,15 @@ void FileAVProducer::notifyStreamEnd() {
     for (auto& consumer : consumers) {
         consumer->onStreamEnd();
     }
+}
+
+std::chrono::microseconds FileAVProducer::getPosition() const {
+    if (!running.load()) {
+        return std::chrono::microseconds::zero();
+    }
+    
+    auto now = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        now - playback_start_time);
+    return elapsed;
 }
