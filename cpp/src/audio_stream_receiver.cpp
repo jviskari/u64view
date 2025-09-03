@@ -5,8 +5,7 @@
 
 AudioStreamReceiver::AudioStreamReceiver()
     : StreamReceiver(Config::Network::MULTICAST_GROUP, Config::Network::AUDIO_PORT),
-      audio_device(0), last_sequence(0), dropped_packets(0), total_packets(0),
-      underrun_count(0) {
+      last_sequence(0), dropped_packets(0), total_packets(0) {
     last_receive_time.store(std::chrono::high_resolution_clock::time_point{});
 }
 
@@ -19,35 +18,8 @@ bool AudioStreamReceiver::initialize() {
         return false;
     }
     
-    // Setup SDL Audio with more conservative settings
-    SDL_AudioSpec desired_spec = {};
-    desired_spec.freq = Config::Audio::SAMPLE_RATE;
-    desired_spec.format = AUDIO_S16LSB; // Ensure little-endian 16-bit
-    desired_spec.channels = Config::Audio::CHANNELS;
-    desired_spec.samples = Config::Audio::BUFFER_SAMPLES;
-    desired_spec.callback = audioCallback;
-    desired_spec.userdata = this;
-    
-    // Allow SDL to change frequency if needed, but not format/channels
-    audio_device = SDL_OpenAudioDevice(nullptr, 0, &desired_spec, &audio_spec, 
-                                     SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
-    if (audio_device == 0) {
-        std::cerr << "Failed to open audio device: " << SDL_GetError() << std::endl;
-        return false;
-    }
-    
-    // Warn if format changed
-    if (audio_spec.format != AUDIO_S16LSB) {
-        std::cerr << "Warning: Audio format changed from S16LSB to " << audio_spec.format << std::endl;
-    }
-    if (audio_spec.channels != Config::Audio::CHANNELS) {
-        std::cerr << "Warning: Audio channels changed from " << Config::Audio::CHANNELS 
-                  << " to " << static_cast<int>(audio_spec.channels) << std::endl;
-    }
-    
-    std::cout << "Audio initialized: " << audio_spec.freq << "Hz, " 
-              << static_cast<int>(audio_spec.channels) << " channels, " 
-              << audio_spec.samples << " samples buffer" << std::endl;
+    std::cout << "Audio receiver initialized for " << Config::Audio::SAMPLE_RATE 
+              << "Hz, " << Config::Audio::CHANNELS << " channels" << std::endl;
     
     stats_time = std::chrono::high_resolution_clock::now();
     return true;
@@ -55,17 +27,10 @@ bool AudioStreamReceiver::initialize() {
 
 void AudioStreamReceiver::start() {
     StreamReceiver::start();
-    SDL_PauseAudioDevice(audio_device, 0); // Start playback
-    std::cout << "Audio playback started" << std::endl;
+    std::cout << "Audio receiver started" << std::endl;
 }
 
 void AudioStreamReceiver::stop() {
-    if (audio_device != 0) {
-        SDL_PauseAudioDevice(audio_device, 1); // Pause playback
-        SDL_CloseAudioDevice(audio_device);
-        audio_device = 0;
-    }
-    
     StreamReceiver::stop();
     
     // Clear queue
@@ -138,51 +103,41 @@ void AudioStreamReceiver::processPacket(const char* data, size_t size) {
     }
 }
 
-bool AudioStreamReceiver::getNextSamples(int16_t* buffer, int sample_count) {
+bool AudioStreamReceiver::hasAudioData() {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    return !packet_queue.empty();
+}
+
+std::vector<int16_t> AudioStreamReceiver::getNextSamples(size_t max_samples) {
     std::lock_guard<std::mutex> lock(queue_mutex);
     
-    // Check if we have enough data
-    if (packet_queue.empty()) {
-        // Fill with silence and count underrun
-        std::memset(buffer, 0, sample_count * sizeof(int16_t));
-        underrun_count++;
-        return false;
-    }
+    std::vector<int16_t> result;
     
-    int samples_filled = 0;
-    
-    // Fill buffer from available packets
-    while (samples_filled < sample_count && !packet_queue.empty()) {
+    // Collect samples from available packets
+    while (result.size() < max_samples && !packet_queue.empty()) {
         AudioPacket& packet = packet_queue.front();
         
-        int samples_needed = sample_count - samples_filled;
-        int samples_available = static_cast<int>(packet.samples.size());
-        int samples_to_copy = std::min(samples_needed, samples_available);
+        size_t samples_needed = max_samples - result.size();
+        size_t samples_available = packet.samples.size();
+        size_t samples_to_take = std::min(samples_needed, samples_available);
         
-        // Copy samples
-        std::memcpy(buffer + samples_filled, packet.samples.data(), 
-                   samples_to_copy * sizeof(int16_t));
+        // Copy samples to result
+        result.insert(result.end(), 
+                     packet.samples.begin(), 
+                     packet.samples.begin() + samples_to_take);
         
-        samples_filled += samples_to_copy;
-        
-        // Remove packet if fully consumed
-        if (samples_to_copy >= samples_available) {
+        // Remove taken samples from packet
+        if (samples_to_take >= samples_available) {
+            // Consumed entire packet
             packet_queue.pop();
         } else {
-            // Partial consumption - remove used samples from packet
+            // Partial consumption - remove used samples
             packet.samples.erase(packet.samples.begin(), 
-                               packet.samples.begin() + samples_to_copy);
+                               packet.samples.begin() + samples_to_take);
         }
     }
     
-    // Fill remaining with silence if needed
-    if (samples_filled < sample_count) {
-        std::memset(buffer + samples_filled, 0, 
-                   (sample_count - samples_filled) * sizeof(int16_t));
-        underrun_count++;
-    }
-    
-    return samples_filled > 0;
+    return result;
 }
 
 size_t AudioStreamReceiver::getQueueSize() const {
@@ -194,22 +149,9 @@ std::chrono::high_resolution_clock::time_point AudioStreamReceiver::getLastRecei
     return last_receive_time.load();
 }
 
-void AudioStreamReceiver::audioCallback(void* userdata, Uint8* stream, int len) {
-    AudioStreamReceiver* receiver = static_cast<AudioStreamReceiver*>(userdata);
-    int16_t* buffer = reinterpret_cast<int16_t*>(stream);
-    int sample_count = len / sizeof(int16_t);
-    
-    // Clear the buffer first
-    std::memset(stream, 0, len);
-    
-    // Fill with audio data
-    receiver->getNextSamples(buffer, sample_count);
-}
-
 void AudioStreamReceiver::printStats() {
     double drop_rate = total_packets > 0 ? (100.0 * dropped_packets / total_packets) : 0.0;
     std::cout << "\nAudio Stats - Total: " << total_packets.load()
               << ", Dropped: " << dropped_packets.load()
-              << " (" << drop_rate << "%), Queue: " << getQueueSize()
-              << ", Underruns: " << underrun_count.load() << std::endl;
+              << " (" << drop_rate << "%), Queue: " << getQueueSize() << std::endl;
 }

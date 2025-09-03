@@ -60,9 +60,6 @@ private:
     AudioAVFrame convertAudioFrame(const std::vector<int16_t>& samples, uint64_t timestamp_us);
     void notifyError(const std::string& error);
     void printStats();
-    
-    // Helper to get audio samples from receiver
-    std::vector<int16_t> getAudioSamples(size_t sample_count);
 };
 
 #endif // NETWORK_AV_PRODUCER_H

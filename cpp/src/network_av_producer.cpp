@@ -20,7 +20,7 @@ bool NetworkAVProducer::initialize() {
         return false;
     }
     
-    // Initialize audio receiver
+    // Initialize audio receiver (no SDL here!)
     audio_receiver = std::make_unique<AudioStreamReceiver>();
     if (!audio_receiver->initialize()) {
         std::cerr << "Failed to initialize audio receiver" << std::endl;
@@ -126,27 +126,30 @@ void NetworkAVProducer::producerLoop() {
         }
         
         // Process audio - get samples in chunks suitable for frames
-        const size_t samples_per_frame = 1024; // About 21ms at 48kHz
-        auto audio_samples = getAudioSamples(samples_per_frame);
-        if (!audio_samples.empty()) {
-            auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::high_resolution_clock::now() - start_time).count();
+        if (audio_receiver->hasAudioData()) {
+            const size_t samples_per_frame = 1024; // About 21ms at 48kHz
+            auto audio_samples = audio_receiver->getNextSamples(samples_per_frame);
             
-            AudioAVFrame av_frame = convertAudioFrame(audio_samples, timestamp_us);
-            
-            // Send to all consumers
-            {
-                std::lock_guard<std::mutex> lock(consumers_mutex);
-                for (auto& consumer : consumers) {
-                    consumer->onAudioFrame(av_frame);
+            if (!audio_samples.empty()) {
+                auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::high_resolution_clock::now() - start_time).count();
+                
+                AudioAVFrame av_frame = convertAudioFrame(audio_samples, timestamp_us);
+                
+                // Send to all consumers
+                {
+                    std::lock_guard<std::mutex> lock(consumers_mutex);
+                    for (auto& consumer : consumers) {
+                        consumer->onAudioFrame(av_frame);
+                    }
                 }
+                
+                audio_frames_produced++;
+                produced_frame = true;
+                
+                // Update sync
+                av_sync->updateAudioTimestamp();
             }
-            
-            audio_frames_produced++;
-            produced_frame = true;
-            
-            // Update sync
-            av_sync->updateAudioTimestamp();
         }
         
         // Print stats periodically
@@ -200,19 +203,6 @@ AudioAVFrame NetworkAVProducer::convertAudioFrame(const std::vector<int16_t>& sa
     av_frame.samples = samples;
     
     return av_frame;
-}
-
-std::vector<int16_t> NetworkAVProducer::getAudioSamples(size_t sample_count) {
-    std::vector<int16_t> samples;
-    samples.resize(sample_count);
-    
-    // Get samples from audio receiver
-    if (audio_receiver->getNextSamples(samples.data(), static_cast<int>(sample_count))) {
-        return samples;
-    }
-    
-    // Return empty vector if no samples available
-    return {};
 }
 
 void NetworkAVProducer::notifyError(const std::string& error) {
